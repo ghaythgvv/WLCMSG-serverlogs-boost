@@ -11,7 +11,7 @@ Logs server events into the matching channel of your SERVER LOGS category:
     role created / deleted .. -ROLE-CREATED-DELETED
     channel created / deleted -CHANNEL-CREATED-DELETED
     voice join / leave / move -join-left-the-channel
-    voice mod mute / deafen / disconnect -desconect-deafen-mute
+    voice mod mute / deafen / disconnect -disconect-deafen-mute  (any spelling that contains deafen-mute)
     everything .............. LOGS-ALL-SERVER
 
 Channels are found automatically by their NAME (the symbols in front don't matter).
@@ -54,7 +54,7 @@ CHANNEL_KEYWORDS = {
     "role_cd": "role-created-deleted",
     "channel_cd": "channel-created-deleted",
     "voice": "join-left-the-channel",
-    "voice_state": "desconect-deafen-mute",
+    "voice_state": "deafen-mute",   # matches both "desconect-deafen-mute" and "disconect-deafen-mute"
     "all": "logs-all-server",
 }
 

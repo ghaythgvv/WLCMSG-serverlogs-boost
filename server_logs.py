@@ -1,521 +1,1689 @@
 """
-ELT Server Logs (extension for the ELITE SYSTEM bot)
+ELT Punishment Bot  (v3.3)
 =======================================
-Logs server events into the matching channel of your SERVER LOGS category:
+Slash commands: /warn /unwarn /mute /timeout /kick /ban /blacklist /unblacklist
+                +  /warnings /history /blacklisted
+Posts an ANIMATED punishment card (punishment_gif.render_card_gif) with the target's avatar and
+name plus a "View Punishment Details" button. Falls back to the still PNG card if needed.
+/blacklist cards use the skull banner (blacklist_banner.jpg) as their background.
 
-    join / leave ............ -JOIN-LEAVES
-    ban / unban ............. -BANS-UNBANS
-    timeout / untimeout ..... -TIMEOUT
-    kick .................... -KICK
-    role given / removed .... -ROLE-GIVEN-REMOVED
-    role created / deleted .. -ROLE-CREATED-DELETED
-    channel created / deleted -CHANNEL-CREATED-DELETED
-    voice join / leave / move -join-left-the-channel
-    voice mod mute / deafen / disconnect -disconect-deafen-mute  (any spelling that contains deafen-mute)
-    everything .............. LOGS-ALL-SERVER
+Who can use what:
+    Staff (lowest role in STAFF_ROLE_IDS, or above) -> /warn  /unwarn
+    Moderators (MOD_ROLE_ID, or above)              -> + /warnings /history /blacklisted /mute /timeout
+    HIGH RANK (ADMIN_ROLE_ID or above, Administrators, server owner)
+                                                    -> everything: + /kick /ban /blacklist /unblacklist
 
-Channels are found automatically by their NAME (the symbols in front don't matter).
-If you ever rename a channel, either keep the keyword in the name or paste its ID in
-LOG_CHANNEL_IDS below.
+Moderators can NOT kick or ban (MODS_CAN_KICK / MODS_CAN_BAN = False). Only the high rank can.
+When a Moderator or Staff gives a 3rd warning, no ban happens: the high rank is pinged instead.
 
-The bot needs: View Audit Log (to show WHO did it) + View Channel / Send Messages / Embed Links
-in each log channel. SERVER MEMBERS INTENT must be on (it already is for the welcome bot).
+Nobody can punish: the server owner, an Administrator, or anyone whose top role is ABOVE the
+Moderator role. And nobody can punish someone whose top role is equal to or above their own.
 
-This file is loaded by welcome_bot.py:  await bot.load_extension("server_logs")
+/blacklist
+    - Removes ALL roles from the member (except the Super Member role and Discord-managed ones like
+      Server Booster) and gives BLACKLIST_ROLE_ID. The removed roles are saved, so /unblacklist can give them back.
+    - Posts a BLACKLIST card with the skull banner (every other card uses the same banner now too).
+    - The blacklist is locked: if anyone (or another bot, e.g. verification) gives a blacklisted member
+      a role, it is removed again; if they remove the blacklist role, it is put back; if the member
+      leaves and rejoins, they get the blacklist role again.
+    - Only /unblacklist lifts it.
 
-Fixed in this version
-    - Voice logs no longer show "# unknown": when the voice channel was deleted in the meantime
-      (temporary / report rooms), the channel NAME is shown instead.
-    - "Disconnected By Moderator" is only logged when the audit log really shows a NEW disconnect.
-      Before, someone leaving on their own right after a moderator disconnected another person
-      was blamed on that moderator.
-    - Server mute / deafen and timeout logs now check that the audit entry really is a mute / deafen /
-      timeout, so a nickname change or other edit can't be shown as the "moderator" of a mute.
+What's new in v3.3
+    - WARN LOGS: every warning, removed warning and expired warning is logged (same purple style as the
+      server logs) in the channel named "warn" and in LOGS-ALL-SERVER. Set WARN_LOG_CHANNEL_ID to force a channel.
+    - EACH warning expires on its own 30 days after it was given: the bot reads the log every hour,
+      un-warns the member, fixes the Warn roles, posts the green card and DMs them.
+    - Warn roles stack: warning 1 = WARN 1, warning 2 = WARN 1 + WARN 2 (WARN 1 is NOT taken off).
+      Roles change in ONE role edit (a single audit-log entry).
+    - Every /warn DMs the member the reason, the warning count and (on warning 2) the timeout.
+    - 2nd warning = automatic 2 hour timeout, shown on the SAME warning card (DURATION field),
+      not a second card (WARN_TIMEOUT_AT / WARN_TIMEOUT_HOURS).
+
+What's new in v3.2
+    - COMMAND WATCHDOG: every 10 minutes the bot checks that its slash commands still exist on Discord
+      and puts them back if another bot (using the SAME token) wiped them. It never syncs more than
+      15 times in 24 hours (Discord's limit). The real cure is still a separate token for each bot.
+
+What's new in v3.1
+    - Names on the cards: fancy Unicode names (bold / full-width letters) are converted to plain letters
+      (punishment_gif.clean_for_card), and card_name() falls back to the global name / username /
+      user ID so a card never shows a lone "!" or an empty name.
+    - The WARNING CLEARED card text no longer shows the case number (it is still in the details button).
+    - /unwarn now DMs the member that a warning was removed.
+
+What's new in v3
+    - /blacklist, /unblacklist, /blacklisted. The Super Member role is never removed by /blacklist.
+    - Every card (warn, unwarn, mute, timeout, kick, ban, blacklist) now uses the skull banner.
+    - /kick and /ban are for the high rank only (the "high rank" now also counts the ADMIN_ROLE_ID role,
+      not only members with the Administrator permission).
+    - Warning severity is passed to the card directly (no more temporary change of the shared style table).
+    - Longer stamps (BLACKLIST, WARNING CLEARED) are drawn smaller so they don't run into the title.
+    - Fixed: a very dark card background could turn black pixels see-through in the GIF.
+    - Fixed: the animated background was decoded again on every card (cache is bigger now).
+
+Requirements:
+    pip install discord.py Pillow     (discord.py 2.4 or newer)
+
+Before running:
+    - punishment_card.py, punishment_gif.py, blacklist_banner.jpg and the fonts/ folder next to this file.
+      (card_bg.gif is only used as a backup if the banner picture is missing.)
+    - SERVER MEMBERS INTENT enabled in the Developer Portal.
+    - Invite with the "bot" and "applications.commands" scopes.
+    - DISCORD_TOKEN env variable (Railway Variables). Optional STAFF_ROLE_IDS (comma separated).
+    - The bot's role must sit ABOVE anyone you want to punish, above the Warn roles and above the Blacklist role.
+    - The bot needs Manage Roles, Moderate Members, Kick Members and Ban Members.
+    - Railway: add a Volume mounted at /data so cases and the blacklist survive redeploys.
+    - This bot needs its OWN Discord application + token (shared tokens overwrite each other's commands).
+
+Slash commands vanishing: this happens when ANOTHER bot uses the same token (each one overwrites the
+other's commands). Give every bot its own Discord application + token. The bot checks its commands once
+at startup (and every 10 minutes after that) and re-registers any that are missing.
+Manual fix: an admin mentions the bot and types "sync".
 """
 
-from __future__ import annotations
-
+import io
+import os
+import re
+import json
+import time
+import shutil
 import asyncio
+import traceback
 import unicodedata
+from datetime import datetime, timedelta, timezone
 
 import discord
-from discord.ext import commands
+from discord import app_commands
+from discord.ext import commands, tasks
+
+from punishment_card import render_card, TYPE_STYLE, TITLE_WORD
+from punishment_gif import render_card_gif, clean_for_card, MAX_BYTES, BANNER_PATH
+
+# Own style for the green "warning cleared" card.
+TYPE_STYLE.setdefault("WARNING CLEARED", ((70, 220, 120), 100))
+# Warning 2 = warning + automatic timeout on ONE card: stamp "WARN + TIMEOUT", title "NEW WARNING".
+TYPE_STYLE.setdefault("WARN + TIMEOUT", ((255, 138, 61), 66))
+TITLE_WORD.setdefault("WARN + TIMEOUT", "WARNING")
+
+# Serialises every /warn: counting, card style, saving and roles happen one warn at a time.
+warning_lock = asyncio.Lock()
+# Serialises /blacklist and /unblacklist.
+blacklist_lock = asyncio.Lock()
 
 # =========================== CONFIG ===========================
-GUILD_ID = 1410440666747633707  # ELT server ID
+TOKEN = os.environ.get("DISCORD_TOKEN")
 
-# key -> keyword that must appear in the channel name (lowercase)
-CHANNEL_KEYWORDS = {
-    "join_leave": "join-leaves",
-    "ban": "bans-unbans",
-    "timeout": "timeout",
-    "kick": "kick",
-    "role_member": "role-given-removed",
-    "role_cd": "role-created-deleted",
-    "channel_cd": "channel-created-deleted",
-    "voice": "join-left-the-channel",
-    "voice_state": "deafen-mute",   # matches both "desconect-deafen-mute" and "disconect-deafen-mute"
-    "all": "logs-all-server",
+GUILD_ID = 1410440666747633707
+GUILD = discord.Object(id=GUILD_ID)
+
+PUNISHMENT_LOG_CHANNEL_ID = None   # None = post in the channel where the command was used
+
+MOD_ROLE_ID = 1513904125086011402
+ADMIN_ROLE_ID = 1513904120803889243   # the HIGH RANK role: can kick / ban / blacklist, pinged on a 3rd warning
+
+# Who may use the heavy commands. False = high rank only.
+MODS_CAN_BAN = False
+MODS_CAN_KICK = False
+BLACKLIST_MIN_TIER = "admin"       # "admin" = high rank only, "mod" = moderators too
+
+WARN_1_ROLE_ID = 1513904153900875897
+WARN_2_ROLE_ID = 1513904154719027291
+
+BLACKLIST_ROLE_ID = 1554563076681109524   # the role a blacklisted member gets
+SUPER_MEMBER_ROLE_ID = 1513904142551220366   # NEVER taken away by /blacklist
+KEEP_ROLE_IDS = {SUPER_MEMBER_ROLE_ID}       # add more role IDs here if /blacklist should leave them alone
+
+WARNING_EXPIRE_DAYS = 30
+MAX_WARNINGS = 3
+
+# Automatic timeout when a member reaches this warning number (and how long it lasts).
+WARN_TIMEOUT_AT = 2
+WARN_TIMEOUT_HOURS = 2
+
+WARNING_CLEAR_CHANNEL_ID = 1540154905644367893
+
+# Where the WARN LOGS go (same look as the server logs). None = the channel named "warn"
+# (every log is also copied to LOGS-ALL-SERVER). Or paste a channel ID here.
+WARN_LOG_CHANNEL_ID = None
+LOG_PURPLE = 0x9B30FF
+
+DM_PUNISHED_MEMBERS = True   # send the punished member a DM with the reason
+
+STAFF_ROLE_IDS = {
+    int(x)
+    for x in os.environ.get("STAFF_ROLE_IDS", "1513904136783925380").replace(" ", "").split(",")
+    if x.isdigit()
 }
 
-# Optional: force a channel by ID instead of by name. Example: {"kick": 123456789}
-LOG_CHANNEL_IDS: dict[str, int | None] = {}
-
-PURPLE = 0x9B30FF   # every log uses this color
-NEW_ACCOUNT_DAYS = 7
+DATA_DIR = (
+    os.environ.get("DATA_DIR")
+    or os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+    or os.path.dirname(os.path.abspath(__file__))
+)
+DB_PATH = os.path.join(DATA_DIR, "punishments.json")
 # ================================================================
 
+intents = discord.Intents.default()
+intents.members = True
 
-def norm(text: str) -> str:
-    """Fancy letters, emoji and symbols are ignored: '┃𝗥𝗢𝗟𝗘-𝗚𝗜𝗩𝗘𝗡' -> 'rolegiven'."""
+bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
+
+_BOLD_UPPER_START = 0x1D5D4
+_BOLD_LOWER_START = 0x1D5EE
+_BOLD_DIGIT_START = 0x1D7EC
+
+
+def bold(text: str) -> str:
+    """A-Z, a-z, 0-9 -> Mathematical Sans-Serif Bold."""
+    if not text:
+        return text
+    out = []
+    for ch in text:
+        code = ord(ch)
+        if 65 <= code <= 90:
+            out.append(chr(_BOLD_UPPER_START + (code - 65)))
+        elif 97 <= code <= 122:
+            out.append(chr(_BOLD_LOWER_START + (code - 97)))
+        elif 48 <= code <= 57:
+            out.append(chr(_BOLD_DIGIT_START + (code - 48)))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def short(text: str, n: int) -> str:
+    text = (text or "").replace("\n", " ")
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+# ================================================================
+# WARN LOGS (#warn + LOGS-ALL-SERVER)
+# ================================================================
+def _norm(text: str) -> str:
+    """Fancy letters, emoji and symbols are ignored: '┃𝗪𝗔𝗥𝗡' -> 'warn'."""
     text = unicodedata.normalize("NFKC", text).lower()
     return "".join(c for c in text if c.isalnum())
 
 
-def person(user: discord.abc.Snowflake | None) -> str:
-    """@mention + copyable ID on one line."""
-    if user is None:
-        return "Unknown"
-    mention = getattr(user, "mention", f"<@{user.id}>")
-    return f"{mention} (`{user.id}`)"
-
-
-def when(dt) -> str:
-    """'Oct 5, 2026 (3 hours ago)'"""
-    if dt is None:
-        return "Unknown"
-    return f"{discord.utils.format_dt(dt, 'D')} ({discord.utils.format_dt(dt, 'R')})"
-
-
-def span(seconds: float) -> str:
-    """Seconds -> '2d 3h'."""
-    seconds = int(max(seconds, 0))
-    parts = []
-    for name, size in (("d", 86400), ("h", 3600), ("m", 60), ("s", 1)):
-        if seconds >= size:
-            parts.append(f"{seconds // size}{name}")
-            seconds %= size
-        if len(parts) == 2:
-            break
-    return " ".join(parts) or "0s"
-
-
-def make(title: str, *lines: str) -> discord.Embed:
-    """Big # title, then one clean line per detail."""
-    body = "\n".join(line for line in lines if line)
-    return discord.Embed(description=f"# {title}\n{body}", color=PURPLE)
-
-
-def line(label: str, value: str) -> str:
+def _log_line(label: str, value: str) -> str:
     return f"**{label}:** {value}"
 
 
-def chan_type(channel: discord.abc.GuildChannel) -> str:
-    return channel.type.name.replace("_", " ").title()
+def _person(user) -> str:
+    return f"{user.mention} (`{user.id}`)"
 
 
-def yn(value: bool) -> str:
-    return "Yes" if value else "No"
-
-
-def vc_ref(guild: discord.Guild, channel) -> str:
-    """A clickable voice channel - or, if it was deleted meanwhile (temporary / report rooms),
-    its name instead of '# unknown'."""
-    live = guild.get_channel(channel.id)
-    if live is not None:
-        return f"{live.mention} (`{live.id}`)"
-    return f"**{channel.name}** (`{channel.id}`) - channel was deleted"
-
-
-class ServerLogs(commands.Cog):
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
-        # audit entry id -> how many of its disconnects were already matched to a member
-        self._disconnects_used: dict[int, int] = {}
-
-    # ---------------------------------------------------------------- helpers
-    def find_channel(self, guild: discord.Guild, key: str) -> discord.TextChannel | None:
-        forced = LOG_CHANNEL_IDS.get(key)
-        if forced:
-            ch = guild.get_channel(forced)
-            return ch if isinstance(ch, discord.TextChannel) else None
-        keyword = norm(CHANNEL_KEYWORDS[key])
+def find_warn_log_channels(guild: discord.Guild) -> list:
+    """The warn log channel (by ID, or the channel whose name is exactly 'warn') + LOGS-ALL-SERVER."""
+    channels = []
+    if WARN_LOG_CHANNEL_ID:
+        ch = guild.get_channel(WARN_LOG_CHANNEL_ID)
+        if isinstance(ch, discord.TextChannel):
+            channels.append(ch)
+    else:
         for ch in guild.text_channels:
-            if keyword in norm(ch.name):
-                return ch
-        return None
+            if _norm(ch.name) == "warn":
+                channels.append(ch)
+                break
+    for ch in guild.text_channels:
+        if "logsallserver" in _norm(ch.name) and ch not in channels:
+            channels.append(ch)
+            break
+    return channels
 
-    @commands.Cog.listener()
-    async def on_ready(self):
-        """Prints in the Railway logs which log channels were found (and if the bot can write there)."""
-        guild = self.bot.get_guild(GUILD_ID)
-        if guild is None:
-            print("[logs] ERROR: server not found")
-            return
-        for key in CHANNEL_KEYWORDS:
-            ch = self.find_channel(guild, key)
-            if ch is None:
-                print(f"[logs] ERROR: no channel found for '{key}' (looking for '{CHANNEL_KEYWORDS[key]}')")
-                continue
-            perms = ch.permissions_for(guild.me)
-            ok = perms.view_channel and perms.send_messages and perms.embed_links
-            print(f"[logs] {'OK' if ok else 'WARN'}: {key} -> #{ch.name}" + ("" if ok else "  (bot can't send/embed here)"))
-        if not guild.me.guild_permissions.view_audit_log:
-            print("[logs] WARN: the bot is missing View Audit Log")
 
-    async def log(self, guild: discord.Guild, key: str, embed: discord.Embed) -> None:
-        """Send the embed to its own channel and to LOGS-ALL-SERVER."""
-        embed.timestamp = discord.utils.utcnow()
+async def log_warn_event(guild: discord.Guild, title: str, member, *lines: str):
+    """Posts one purple log embed (big title + one line per detail) like the server logs do."""
+    try:
+        body = "\n".join(l for l in lines if l)
+        embed = discord.Embed(description=f"# {title}\n{body}", color=LOG_PURPLE, timestamp=discord.utils.utcnow())
+        embed.set_thumbnail(url=member.display_avatar.url)
         embed.set_footer(text="ELT Logs")
-        sent_to: set[int] = set()
-        for k in (key, "all"):
-            ch = self.find_channel(guild, k)
-            if ch is None or ch.id in sent_to:
-                continue
-            sent_to.add(ch.id)
+        for ch in find_warn_log_channels(guild):
             try:
                 await ch.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
             except discord.HTTPException as e:
-                print(f"[logs] ERROR: could not log to #{ch.name}: {e}")
+                print(f"⚠️ Couldn't write the warn log to #{ch.name}: {e}")
+    except Exception as e:   # a log problem must NEVER break a punishment
+        print(f"⚠️ Warn log failed: {type(e).__name__}: {e}")
 
-    async def audit_entry(
-        self,
-        guild: discord.Guild,
-        action: discord.AuditLogAction,
-        target_id: int,
-        within: float = 20.0,
-        check=None,
-    ) -> discord.AuditLogEntry | None:
-        """Finds the audit log entry for an action that just happened (to show who did it).
-        `check(entry)` can reject entries that are the right type but the wrong kind of change."""
-        if not guild.me.guild_permissions.view_audit_log:
-            return None
-        await asyncio.sleep(2)  # Discord writes the audit log entry slightly after the event
+
+# ================================================================
+# CASE NUMBERS + DATABASE (crash-safe)
+# ================================================================
+
+def _read_db_file(path: str):
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    records = {int(k): v for k, v in data.get("records", {}).items()}
+    blacklist = {int(k): v for k, v in data.get("blacklist", {}).items()}
+    return int(data.get("counter", 0)), records, blacklist
+
+
+def load_db():
+    """Reads the database. A corrupt file is copied aside (never overwritten) and the backup is tried."""
+    for path in (DB_PATH, DB_PATH + ".bak"):
         try:
-            async for entry in guild.audit_logs(limit=15, action=action):
-                if entry.target is None or entry.target.id != target_id:
-                    continue
-                if check is not None and not check(entry):
-                    continue
-                age = (discord.utils.utcnow() - entry.created_at).total_seconds()
-                if age <= within:
-                    return entry
-        except discord.HTTPException:
-            pass
+            counter, records, blacklist = _read_db_file(path)
+            if path != DB_PATH:
+                print(f"♻️ Restored the case database from {path}")
+            return max(counter, max(records) if records else 0), records, blacklist
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            print(f"⚠️ Couldn't read {path}: {e}")
+            try:
+                shutil.copyfile(path, f"{path}.corrupt-{int(time.time())}")
+                print(f"📦 Kept a copy of the unreadable file as {path}.corrupt-*")
+            except Exception:
+                pass
+    return 0, {}, {}
+
+
+def save_db():
+    try:
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        tmp = DB_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(
+                {"counter": case_counter, "records": punishment_records, "blacklist": blacklist_records},
+                f, ensure_ascii=False,
+            )
+        if os.path.exists(DB_PATH):
+            try:
+                shutil.copyfile(DB_PATH, DB_PATH + ".bak")
+            except Exception as e:
+                print(f"⚠️ Couldn't refresh the backup: {e}")
+        os.replace(tmp, DB_PATH)
+    except Exception as e:
+        print(f"❌ Couldn't save {DB_PATH}: {e}")
+
+
+case_counter, punishment_records, blacklist_records = load_db()
+print(f"📁 Case data: {DB_PATH} (last case #{case_counter:04d}, {len(punishment_records)} saved, "
+      f"{len(blacklist_records)} blacklisted)")
+
+
+def next_case() -> int:
+    global case_counter
+    case_counter += 1
+    save_db()
+    return case_counter
+
+
+def card_name(member: discord.abc.User) -> str:
+    """Best readable name for the card. Tries the display name, then the global name, then the
+    username, and skips any whose cleaned version is empty or just symbols (e.g. '!')."""
+    candidates = [
+        getattr(member, "display_name", None),
+        getattr(member, "global_name", None),
+        getattr(member, "name", None),
+    ]
+    cleaned = [(clean_for_card(c) or "").strip() for c in candidates if c]
+
+    def alnum(s: str) -> int:
+        return sum(ch.isalnum() for ch in s)
+
+    for s in cleaned:              # first choice: at least 2 real letters/digits
+        if alnum(s) >= 2:
+            return s
+    for s in cleaned:              # otherwise: at least 1
+        if alnum(s) >= 1:
+            return s
+    return str(member.id)          # last resort, never an empty or symbol-only card
+
+
+def audit_reason(reason: str, action: str, by: discord.abc.User) -> str:
+    return f"{reason} — {action} by {by}"[:512]
+
+
+# ================================================================
+# PERMISSIONS
+# ================================================================
+TIER_RANK = {"none": 0, "staff": 1, "mod": 2, "admin": 3}
+TIER_LABEL = {"staff": "Staff", "mod": "Moderators", "admin": "the high rank"}
+BAN_MIN_TIER = "mod" if MODS_CAN_BAN else "admin"
+KICK_MIN_TIER = "mod" if MODS_CAN_KICK else "admin"
+
+
+class NotAllowed(app_commands.CheckFailure):
+    """The text is shown to the user."""
+
+
+def actor_tier(member: discord.Member) -> str:
+    guild = member.guild
+    if member.id == guild.owner_id or member.guild_permissions.administrator:
+        return "admin"
+    # the high-rank ROLE counts too (it may not have the Administrator permission)
+    admin_role = guild.get_role(ADMIN_ROLE_ID)
+    if admin_role and member.top_role >= admin_role:
+        return "admin"
+    mod_role = guild.get_role(MOD_ROLE_ID)
+    if mod_role and member.top_role >= mod_role:
+        return "mod"
+    staff_roles = [r for r in (guild.get_role(i) for i in STAFF_ROLE_IDS) if r]
+    if staff_roles and member.top_role >= min(staff_roles):
+        return "staff"
+    return "none"
+
+
+def can_ban(member: discord.Member) -> bool:
+    return TIER_RANK[actor_tier(member)] >= TIER_RANK[BAN_MIN_TIER]
+
+
+def require_tier(min_tier: str):
+    async def predicate(interaction: discord.Interaction) -> bool:
+        if isinstance(interaction.user, discord.Member) and TIER_RANK[actor_tier(interaction.user)] >= TIER_RANK[min_tier]:
+            return True
+        raise NotAllowed(f"This command is for {TIER_LABEL[min_tier]} or higher.")
+    return app_commands.check(predicate)
+
+
+def target_problem(interaction: discord.Interaction, member: discord.Member, needs_bot_rank: bool = True):
+    """Returns a message if the punishment shouldn't go ahead."""
+    guild = interaction.guild
+
+    if member.id == interaction.user.id:
+        return "You can't punish yourself."
+    if bot.user and member.id == bot.user.id:
+        return "I can't punish myself."
+    if member.id == guild.owner_id:
+        return "You can't punish the server owner."
+    if member.guild_permissions.administrator:
+        return "You can't punish an administrator."
+
+    mod_role = guild.get_role(MOD_ROLE_ID)
+    if mod_role and member.top_role > mod_role:
+        return "That member is protected (their role is above Moderator)."
+
+    if interaction.user.id != guild.owner_id and member.top_role >= interaction.user.top_role:
+        return "That member's highest role is equal to or above yours."
+
+    if needs_bot_rank and guild.me and member.top_role >= guild.me.top_role:
+        return "That member's highest role is equal to or above mine — move my role higher."
+
+    return None
+
+
+def get_log_channel(interaction: discord.Interaction):
+    channel = (
+        interaction.guild.get_channel(PUNISHMENT_LOG_CHANNEL_ID)
+        if PUNISHMENT_LOG_CHANNEL_ID else interaction.channel
+    )
+    return channel or interaction.channel
+
+
+# ================================================================
+# SENDING HELPERS
+# ================================================================
+async def send_with_retry(channel, **kwargs):
+    """discord.py already waits out normal rate limits; this adds a few retries for hiccups."""
+    delays = [1, 2, 4, 8]
+    for attempt in range(len(delays) + 1):
+        try:
+            return await channel.send(**kwargs)
+        except discord.HTTPException as e:
+            retryable = e.status == 429 or e.status >= 500
+            if not retryable or attempt == len(delays):
+                raise
+            print(f"⏳ Send failed ({e.status}), retrying in {delays[attempt]}s")
+            await asyncio.sleep(delays[attempt])
+
+
+async def dm_member(user: discord.abc.User, guild: discord.Guild, title: str, reason: str, color: int, note: str = ""):
+    """DMs the punished member. Returns the message (so it can be deleted again) or None."""
+    if not DM_PUNISHED_MEMBERS or getattr(user, "bot", False):
+        return None
+    embed = discord.Embed(title=bold(title), color=color, timestamp=discord.utils.utcnow())
+    embed.add_field(name=bold("Reason"), value=short(reason, 1000), inline=False)
+    if note:
+        embed.add_field(name=bold("Info"), value=short(note, 1000), inline=False)
+    embed.set_footer(text=guild.name)
+    try:
+        return await user.send(embed=embed)
+    except (discord.Forbidden, discord.HTTPException):
         return None
 
-    @staticmethod
-    def by(entry: discord.AuditLogEntry | None, label: str = "By") -> str:
-        return line(label, person(entry.user) if entry else "Unknown")
 
-    @staticmethod
-    def why(entry: discord.AuditLogEntry | None, always: bool = False) -> str:
-        """Reason line. Always shown for punishments, only when it exists otherwise."""
-        text = entry.reason if entry and entry.reason else None
-        if text:
-            return line("Reason", text[:900])
-        return line("Reason", "No reason provided") if always else ""
+async def undo_dm(message):
+    """Removes a DM again when the action it announced failed."""
+    if message is None:
+        return
+    try:
+        await message.delete()
+    except discord.HTTPException:
+        pass
 
-    # ---------------------------------------------------------------- join / leave
-    @commands.Cog.listener()
-    async def on_member_join(self, member: discord.Member):
-        if member.guild.id != GUILD_ID:
-            return
-        age = (discord.utils.utcnow() - member.created_at).total_seconds()
-        embed = make(
-            "Member Joined",
-            line("Member", person(member)),
-            line("Account", "Bot" if member.bot else "User"),
-            line("Created", when(member.created_at)),
-            line("Members", f"`{member.guild.member_count:,}`"),
-            f"**New account** - only `{span(age)}` old." if age < NEW_ACCOUNT_DAYS * 86400 else "",
-        )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        await self.log(member.guild, "join_leave", embed)
 
-    @commands.Cog.listener()
-    async def on_member_remove(self, member: discord.Member):
-        guild = member.guild
-        if guild.id != GUILD_ID:
-            return
-
-        roles = [r.mention for r in reversed(member.roles) if r != guild.default_role]
-        stayed = (discord.utils.utcnow() - member.joined_at).total_seconds() if member.joined_at else None
-        embed = make(
-            "Member Left",
-            line("Member", person(member)),
-            line("Time in server", f"`{span(stayed)}`") if stayed is not None else "",
-            line("Joined", when(member.joined_at)) if member.joined_at else "",
-            line("Members", f"`{guild.member_count:,}`"),
-            line(f"Roles ({len(roles)})", " ".join(roles)[:900] if roles else "None"),
-        )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        await self.log(guild, "join_leave", embed)
-
-        # Was it a kick?
-        entry = await self.audit_entry(guild, discord.AuditLogAction.kick, member.id)
-        if entry:
-            kick = make(
-                "Member Kicked",
-                line("Member", person(member)),
-                self.by(entry, "Moderator"),
-                self.why(entry, always=True),
+# ================================================================
+# PUNISHMENT DETAILS BUTTON
+# ================================================================
+class PunishmentDetailsButton(discord.ui.DynamicItem[discord.ui.Button], template=r"punishment_details_(?P<case>[0-9]+)"):
+    def __init__(self, case_no: int):
+        super().__init__(
+            discord.ui.Button(
+                label=f"🔍 {bold('View Punishment Details')}",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"punishment_details_{case_no}",
             )
-            kick.set_thumbnail(url=member.display_avatar.url)
-            await self.log(guild, "kick", kick)
-
-    # ---------------------------------------------------------------- bans
-    @commands.Cog.listener()
-    async def on_member_ban(self, guild: discord.Guild, user: discord.User):
-        if guild.id != GUILD_ID:
-            return
-        entry = await self.audit_entry(guild, discord.AuditLogAction.ban, user.id)
-        embed = make(
-            "Member Banned",
-            line("Member", person(user)),
-            self.by(entry, "Moderator"),
-            line("Created", when(user.created_at)),
-            self.why(entry, always=True),
         )
-        embed.set_thumbnail(url=user.display_avatar.url)
-        await self.log(guild, "ban", embed)
+        self.case_no = case_no
 
-    @commands.Cog.listener()
-    async def on_member_unban(self, guild: discord.Guild, user: discord.User):
-        if guild.id != GUILD_ID:
-            return
-        entry = await self.audit_entry(guild, discord.AuditLogAction.unban, user.id)
-        embed = make(
-            "Member Unbanned",
-            line("Member", person(user)),
-            self.by(entry, "Moderator"),
-            self.why(entry),
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match):
+        return cls(int(match["case"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        record = punishment_records.get(self.case_no)
+        if record is None:
+            return await interaction.response.send_message(
+                bold("Details for this case aren't available anymore."), ephemeral=True
+            )
+
+        display_type = record.get("display_type", record["type"])
+        style = TYPE_STYLE.get(display_type) or TYPE_STYLE.get(record["type"]) or ((150, 150, 150), 0)
+
+        embed = discord.Embed(
+            title=bold(f"Case ELT-{self.case_no:04d} — {display_type.title()}"),
+            color=discord.Color.from_rgb(*style[0]),
         )
-        embed.set_thumbnail(url=user.display_avatar.url)
-        await self.log(guild, "ban", embed)
+        embed.add_field(name=bold("User"), value=f"<@{record['user_id']}> ({bold(record['user_tag'])})", inline=False)
+        embed.add_field(name=bold("Punisher"), value=f"<@{record['punisher_id']}> ({bold(record['punisher_tag'])})", inline=False)
+        embed.add_field(name=bold("Reason"), value=bold(short(record["reason"], 300)), inline=False)
+        embed.add_field(name=bold("Date"), value=bold(record["date_text"]), inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # ---------------------------------------------------------------- roles on members + timeouts
-    @commands.Cog.listener()
-    async def on_member_update(self, before: discord.Member, after: discord.Member):
-        guild = after.guild
-        if guild.id != GUILD_ID:
-            return
 
-        # --- roles given / removed
-        added = [r for r in after.roles if r not in before.roles]
-        removed = [r for r in before.roles if r not in after.roles]
-        if added or removed:
-            entry = await self.audit_entry(guild, discord.AuditLogAction.member_role_update, after.id)
-            if added and not removed:
-                title = "Role Given"
-            elif removed and not added:
-                title = "Role Removed"
-            else:
-                title = "Roles Updated"
-            embed = make(
-                title,
-                line("Member", person(after)),
-                self.by(entry, "Moderator"),
-                line("Added", " ".join(r.mention for r in added)[:900]) if added else "",
-                line("Removed", " ".join(r.mention for r in removed)[:900]) if removed else "",
-                self.why(entry),
+# ================================================================
+# WARNING SYSTEM
+# ================================================================
+def _warning_is_active(record: dict) -> bool:
+    return record.get("type") == "WARNING" and record.get("warning_active", True) is not False
+
+
+def _parse_warning_time(record: dict):
+    value = record.get("warning_issued_at")
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def active_warning_records(member_id: int):
+    records = [
+        (case_no, record)
+        for case_no, record in punishment_records.items()
+        if record.get("user_id") == member_id and _warning_is_active(record)
+    ]
+    records.sort(key=lambda item: (item[1].get("warning_issued_at", ""), item[0]))
+    return records
+
+
+def active_warning_count(member_id: int) -> int:
+    return len(active_warning_records(member_id))
+
+
+def warning_percent(count: int) -> int:
+    return 0 if count <= 0 else 33 if count == 1 else 66 if count == 2 else 100
+
+
+def role_warning_level(guild: discord.Guild, member: discord.Member) -> int:
+    """The warning level the member's Warn roles show (0 / 1 / 2). Used when the saved records
+    and the roles disagree (for example after the database file was lost on a redeploy)."""
+    warn1, warn2 = guild.get_role(WARN_1_ROLE_ID), guild.get_role(WARN_2_ROLE_ID)
+    if warn2 is not None and warn2 in member.roles:
+        return 2
+    if warn1 is not None and warn1 in member.roles:
+        return 1
+    return 0
+
+
+async def update_warning_roles(guild: discord.Guild, member: discord.Member, count: int):
+    """1 warning: Warn 1 | 2 warnings: Warn 1 + Warn 2 (Warn 1 is NOT taken off) | 0 or 3+: none.
+    Everything changes in ONE role edit (one audit-log entry)."""
+    # A blacklisted member keeps only the blacklist role.
+    if member.id in blacklist_records:
+        return
+
+    warn1 = guild.get_role(WARN_1_ROLE_ID)
+    warn2 = guild.get_role(WARN_2_ROLE_ID)
+    if warn1 is None or warn2 is None:
+        print("⚠️ Warning role not found — check WARN_1_ROLE_ID / WARN_2_ROLE_ID")
+        return
+
+    wanted = [warn1] if count == 1 else [warn1, warn2] if count == 2 else []
+    current = [r for r in member.roles if not r.is_default()]
+    base = [r for r in current if r not in (warn1, warn2)]
+    new_roles = base + wanted
+
+    if set(new_roles) == set(current):
+        return   # nothing to change
+
+    try:
+        await member.edit(roles=new_roles, reason="Warning level updated")
+    except discord.Forbidden:
+        print(f"❌ Bot cannot manage warning roles for {member} — move the bot role above them.")
+    except discord.HTTPException as e:
+        print(f"❌ Failed to update warning roles for {member}: {e}")
+
+
+# ================================================================
+# WARNING CLEARED CARD
+# ================================================================
+async def post_warning_cleared_card(guild, member, punisher, reason, cleared_cases=None):
+    """Posts the green WARNING CLEARED card to its channel."""
+    cleared_cases = list(cleared_cases or [])
+    case_no = next_case()
+    date_text = discord.utils.utcnow().strftime("%d/%m/%Y")
+
+    try:
+        avatar_bytes = await member.display_avatar.replace(size=256, format="png").read()
+    except Exception as e:
+        print(f"⚠️ Couldn't fetch avatar for warning-clear card {member}: {e}")
+        avatar_bytes = None
+
+    user_name, punisher_name = card_name(member), card_name(punisher)
+    max_bytes = min(MAX_BYTES, int(guild.filesize_limit * 0.9))
+
+    try:
+        card_bytes = await asyncio.to_thread(
+            render_card_gif, user_name, punisher_name, reason, "WARNING CLEARED",
+            case_no, date_text, avatar_bytes, max_bytes,
+        )
+        ext = "gif"
+    except Exception as e:
+        print(f"⚠️ Warning-clear GIF failed ({type(e).__name__}: {e}) — falling back to PNG")
+        try:
+            card_bytes = await asyncio.to_thread(
+                render_card, user_name, punisher_name, reason, "WARNING CLEARED",
+                case_no, date_text, avatar_bytes,
             )
-            embed.set_thumbnail(url=after.display_avatar.url)
-            await self.log(guild, "role_member", embed)
+            ext = "png"
+        except Exception as e2:
+            print(f"❌ Failed to render warning-clear card: {type(e2).__name__}: {e2}")
+            return False
 
-        # --- timeout / untimeout
-        if before.timed_out_until != after.timed_out_until:
-            entry = await self.audit_entry(
-                guild, discord.AuditLogAction.member_update, after.id,
-                check=lambda e: getattr(e.before, "timed_out_until", None) is not None
-                or getattr(e.after, "timed_out_until", None) is not None,
+    punishment_records[case_no] = {
+        "user_id": member.id,
+        "user_tag": str(member),
+        "punisher_id": punisher.id,
+        "punisher_tag": str(punisher),
+        "reason": reason,
+        "type": "WARNING CLEARED",
+        "display_type": "WARNING CLEARED",
+        "date_text": date_text,
+        "cleared_warning_cases": cleared_cases,
+    }
+    save_db()
+
+    channel = guild.get_channel(WARNING_CLEAR_CHANNEL_ID)
+    if channel is None:
+        print(f"❌ Warning cleared channel {WARNING_CLEAR_CHANNEL_ID} was not found.")
+        return False
+
+    file = discord.File(io.BytesIO(card_bytes), filename=f"warning_cleared_{case_no:04d}.{ext}")
+    view = discord.ui.View(timeout=None)
+    view.add_item(PunishmentDetailsButton(case_no))
+
+    try:
+        await send_with_retry(channel, file=file, view=view)
+        print(f"🟢 WARNING CLEARED case ELT-{case_no:04d} posted for {member}")
+        return True
+    except Exception as e:
+        print(f"❌ Failed to send warning-clear card: {e}")
+        return False
+
+
+# ================================================================
+# NORMAL PUNISHMENT CARD
+# ================================================================
+async def issue_punishment(
+    interaction: discord.Interaction,
+    member: discord.abc.User,
+    ptype: str,
+    reason: str,
+    *,
+    card_ptype: str = None,
+    record_extra: dict = None,
+    confirm_note: str = "",
+    severity: int = None,
+):
+    """
+    Renders + posts the card and saves the case.
+    Returns the case number on success, or None if it failed.
+    card_ptype lets a 3rd warning DISPLAY as BAN while the record stays WARNING.
+    severity overrides the card's severity bar (warnings: 33 / 66 / 100).
+    """
+    case_no = next_case()
+    render_type = (card_ptype or ptype).upper()
+
+    try:
+        avatar_bytes = await member.display_avatar.replace(size=256, format="png").read()
+    except Exception as e:
+        print(f"⚠️ Couldn't fetch avatar for {member}: {e}")
+        avatar_bytes = None
+
+    date_text = discord.utils.utcnow().strftime("%d/%m/%Y")
+    user_name, punisher_name = card_name(member), card_name(interaction.user)
+    max_bytes = min(MAX_BYTES, int(interaction.guild.filesize_limit * 0.9))
+
+    try:
+        card_bytes = await asyncio.to_thread(
+            render_card_gif, user_name, punisher_name, reason, render_type,
+            case_no, date_text, avatar_bytes, max_bytes, severity,
+        )
+        ext = "gif"
+    except Exception as e:
+        print(f"⚠️ Animated card failed ({type(e).__name__}: {e}) — falling back to the still card")
+        try:
+            card_bytes = await asyncio.to_thread(
+                render_card, user_name, punisher_name, reason, render_type,
+                case_no, date_text, avatar_bytes, severity,
             )
-            now = discord.utils.utcnow()
-            if after.timed_out_until and after.timed_out_until > now:
-                embed = make(
-                    "Member Timed Out",
-                    line("Member", person(after)),
-                    self.by(entry, "Moderator"),
-                    line("Duration", f"`{span((after.timed_out_until - now).total_seconds())}`"),
-                    line("Ends", discord.utils.format_dt(after.timed_out_until, "F")),
-                    self.why(entry, always=True),
-                )
-            else:
-                embed = make(
-                    "Timeout Removed",
-                    line("Member", person(after)),
-                    self.by(entry, "Moderator"),
-                    self.why(entry),
-                )
-            embed.set_thumbnail(url=after.display_avatar.url)
-            await self.log(guild, "timeout", embed)
+            ext = "png"
+        except Exception as e2:
+            print(f"❌ Failed to render punishment card: {type(e2).__name__}: {e2}")
+            await interaction.followup.send(
+                f"⚠️ {bold('Something went wrong generating the punishment card.')}", ephemeral=True
+            )
+            return None
 
-    # ---------------------------------------------------------------- roles created / deleted
-    @staticmethod
-    def role_lines(role: discord.Role) -> list[str]:
-        return [
-            line("Role", f"{role.name} (`{role.id}`)"),
-            line("Color", f"`{str(role.color).upper()}`"),
-            line("Position", f"`{role.position}`"),
-            line("Hoisted", yn(role.hoist)),
-            line("Mentionable", yn(role.mentionable)),
-            line("Administrator", yn(role.permissions.administrator)),
-        ]
+    punishment_records[case_no] = {
+        "user_id": member.id,
+        "user_tag": str(member),
+        "punisher_id": interaction.user.id,
+        "punisher_tag": str(interaction.user),
+        "reason": reason,
+        "type": ptype,
+        "display_type": render_type,
+        "date_text": date_text,
+    }
+    if record_extra:
+        punishment_records[case_no].update(record_extra)
+    save_db()
 
-    @commands.Cog.listener()
-    async def on_guild_role_create(self, role: discord.Role):
-        if role.guild.id != GUILD_ID:
-            return
-        entry = await self.audit_entry(role.guild, discord.AuditLogAction.role_create, role.id)
-        embed = make("Role Created", *self.role_lines(role), self.by(entry, "Created by"))
-        await self.log(role.guild, "role_cd", embed)
+    log_channel = get_log_channel(interaction)
+    file = discord.File(io.BytesIO(card_bytes), filename=f"punishment_case_{case_no:04d}.{ext}")
+    view = discord.ui.View(timeout=None)
+    view.add_item(PunishmentDetailsButton(case_no))
 
-    @commands.Cog.listener()
-    async def on_guild_role_delete(self, role: discord.Role):
-        if role.guild.id != GUILD_ID:
-            return
-        entry = await self.audit_entry(role.guild, discord.AuditLogAction.role_delete, role.id)
-        embed = make("Role Deleted", *self.role_lines(role), self.by(entry, "Deleted by"))
-        await self.log(role.guild, "role_cd", embed)
+    try:
+        await send_with_retry(log_channel, file=file, view=view)
+        print(f"✅ Case ELT-{case_no:04d} ({ptype}/{render_type}) posted for {member} by {interaction.user}")
+    except Exception as e:
+        print(f"❌ Failed to send punishment card: {e}")
+        await interaction.followup.send(
+            f"⚠️ {bold('The case was saved but I could not post the card — check my permissions in that channel.')}",
+            ephemeral=True,
+        )
+        return case_no   # the punishment itself IS recorded
 
-    # ---------------------------------------------------------------- channels created / deleted
-    @staticmethod
-    def channel_lines(channel: discord.abc.GuildChannel) -> list[str]:
-        category = getattr(channel, "category", None)
-        lines = [
-            line("Channel", f"{channel.name} (`{channel.id}`)"),
-            line("Type", chan_type(channel)),
-            line("Category", category.name if category else "None"),
-        ]
-        topic = getattr(channel, "topic", None)
-        if topic:
-            lines.append(line("Topic", topic[:300]))
-        if getattr(channel, "nsfw", False):
-            lines.append(line("Age-restricted", "Yes"))
-        limit = getattr(channel, "user_limit", None)
-        if limit:
-            lines.append(line("User limit", f"`{limit}`"))
-        return lines
+    text = f"✅ {bold(f'{ptype.title()} logged for')} {member.mention} {bold('in')} {log_channel.mention}."
+    if confirm_note:
+        text += f" {confirm_note}"
+    await interaction.followup.send(text, ephemeral=True)
+    return case_no
 
-    @commands.Cog.listener()
-    async def on_guild_channel_create(self, channel: discord.abc.GuildChannel):
-        if channel.guild.id != GUILD_ID:
-            return
-        entry = await self.audit_entry(channel.guild, discord.AuditLogAction.channel_create, channel.id)
-        embed = make("Channel Created", *self.channel_lines(channel), self.by(entry, "Created by"))
-        await self.log(channel.guild, "channel_cd", embed)
 
-    @commands.Cog.listener()
-    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):
-        if channel.guild.id != GUILD_ID:
-            return
-        entry = await self.audit_entry(channel.guild, discord.AuditLogAction.channel_delete, channel.id)
-        embed = make("Channel Deleted", *self.channel_lines(channel), self.by(entry, "Deleted by"))
-        await self.log(channel.guild, "channel_cd", embed)
+async def reject(interaction: discord.Interaction, command: str, target: discord.abc.User, msg: str):
+    print(f"🚫 /{command}: {interaction.user} -> {target} blocked: {msg}")
+    await interaction.followup.send(f"⚠️ {bold(msg)}", ephemeral=True)
 
-    # ---------------------------------------------------------------- voice join / leave / move
-    @commands.Cog.listener()
-    async def on_voice_state_update(
-        self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
+
+# ================================================================
+# WARNING EXPIRATION
+# ================================================================
+async def expire_warnings():
+    """EACH warning expires on its own, WARNING_EXPIRE_DAYS after the day it was given.
+    The bot reads the saved log, un-warns the member, fixes the Warn roles and posts the green card."""
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        return
+
+    now = datetime.now(timezone.utc)
+    limit = timedelta(days=WARNING_EXPIRE_DAYS)
+
+    expired: dict[int, list] = {}
+    for case_no, record in punishment_records.items():
+        if not _warning_is_active(record):
+            continue
+        issued = _parse_warning_time(record)
+        # Old records have no exact timestamp - don't guess their expiry.
+        if issued is None or now - issued < limit:
+            continue
+        expired.setdefault(record["user_id"], []).append((case_no, record))
+
+    for member_id, items in expired.items():
+        cleared_cases = []
+        for case_no, record in items:
+            record["warning_active"] = False
+            record["warning_cleared_at"] = now.isoformat()
+            record["warning_clear_method"] = "automatic_30_day_expiry"
+            cleared_cases.append(case_no)
+        save_db()   # saved BEFORE posting, so a crash can never post the same clear twice
+
+        member = guild.get_member(member_id)
+        if member is None:
+            continue   # left the server: cleared quietly, nothing to announce
+
+        try:
+            remaining = active_warning_count(member_id)
+            await update_warning_roles(guild, member, min(remaining, MAX_WARNINGS - 1))
+
+            n = len(items)
+            reason = (
+                f"Warning expired after {WARNING_EXPIRE_DAYS} days. Active warnings left: {remaining}/{MAX_WARNINGS}."
+                if n == 1 else
+                f"{n} warnings expired after {WARNING_EXPIRE_DAYS} days. Active warnings left: {remaining}/{MAX_WARNINGS}."
+            )
+            punisher = guild.me or bot.user
+            if punisher:
+                await post_warning_cleared_card(guild, member, punisher, reason, cleared_cases)
+            await log_warn_event(
+                guild, "Warning Expired", member,
+                _log_line("Member", _person(member)),
+                _log_line("Warnings expired", f"`{n}`"),
+                _log_line("Cases", " ".join(f"`ELT-{c:04d}`" for c in cleared_cases)),
+                _log_line("Active warnings left", f"`{remaining}/{MAX_WARNINGS}`"),
+                f"Automatically removed after {WARNING_EXPIRE_DAYS} days.",
+            )
+            await dm_member(
+                member, guild, f"A warning expired in {guild.name}", reason, 0x57F287,
+                f"Active warnings left: {remaining}/{MAX_WARNINGS}.",
+            )
+            print(f"🟢 {n} warning(s) of {member} expired after {WARNING_EXPIRE_DAYS} days ({remaining} left)")
+        except Exception:
+            print(f"❌ Expiry follow-up failed for {member_id}:")
+            traceback.print_exc()
+
+
+@tasks.loop(hours=1)
+async def warning_expiry_loop():
+    try:
+        await expire_warnings()
+    except Exception:
+        print("❌ warning expiry run failed (it will retry next hour):")
+        traceback.print_exc()
+
+
+@warning_expiry_loop.before_loop
+async def _wait_ready_for_warning_expiry():
+    await bot.wait_until_ready()
+
+
+# ================================================================
+# BLACKLIST HELPERS
+# ================================================================
+def removable_roles(member: discord.Member):
+    """Roles /blacklist takes away: everything except @everyone, the blacklist role, the Super Member
+    role (KEEP_ROLE_IDS) and Discord-managed roles (Server Booster, bot roles) which can't be removed anyway."""
+    return [
+        r for r in member.roles
+        if not r.is_default() and not r.managed and r.id != BLACKLIST_ROLE_ID and r.id not in KEEP_ROLE_IDS
+    ]
+
+
+def kept_roles(member: discord.Member):
+    """Roles a blacklisted member keeps next to the blacklist role."""
+    return [r for r in member.roles if not r.is_default() and (r.managed or r.id in KEEP_ROLE_IDS)]
+
+
+async def lock_blacklist_roles(member: discord.Member, reason: str):
+    """Makes the member's roles exactly: blacklist role + the roles they keep (Super Member, managed roles)."""
+    role = member.guild.get_role(BLACKLIST_ROLE_ID)
+    if role is None:
+        raise RuntimeError("blacklist role not found")
+    await member.edit(roles=kept_roles(member) + [role], reason=reason[:512])
+
+
+# ================================================================
+# SLASH COMMAND SYNC
+# ================================================================
+async def sync_commands() -> bool:
+    for attempt in range(1, 6):
+        try:
+            synced = await bot.tree.sync(guild=GUILD)
+            print(f"🔄 Synced {len(synced)} slash command(s) to guild {GUILD_ID}")
+            return True
+        except Exception as e:
+            print(f"❌ Sync failed (attempt {attempt}/5): {e}")
+            await asyncio.sleep(5 * attempt)
+    return False
+
+
+_commands_checked = False
+
+
+async def ensure_commands():
+    """Runs ONCE at startup: if any of this bot's slash commands are missing on Discord, sync them again.
+    (The command watchdog below keeps checking every 10 minutes, and only syncs when something is missing.)"""
+    mine = {c.name for c in bot.tree.get_commands(guild=GUILD)}
+    try:
+        live = {c.name for c in await bot.tree.fetch_commands(guild=GUILD)}
+    except Exception as e:
+        print(f"⚠️ Couldn't read the live slash commands ({e}) - syncing to be safe")
+        live = set()
+
+    missing = mine - live
+    if not missing:
+        print(f"✅ All {len(mine)} slash commands are registered")
+        return
+    print(f"⚠️ Missing slash commands: {', '.join(sorted(missing))} - syncing")
+    if await sync_commands():
+        print(
+            "🚨 If this shows up after EVERY restart, another bot is using the SAME token as this one "
+            "and wipes these commands when it starts. Give each bot its own Discord application + token."
+        )
+
+
+sync_times: list[float] = []
+
+
+@tasks.loop(minutes=10)
+async def command_watchdog():
+    """Every 10 minutes: if any of this bot's slash commands are gone from Discord, put them back."""
+    mine = {c.name for c in bot.tree.get_commands(guild=GUILD)}
+    try:
+        live = {c.name for c in await bot.tree.fetch_commands(guild=GUILD)}
+    except Exception as e:
+        print(f"⚠️ Watchdog couldn't read the live commands: {e}")
+        return
+
+    missing = mine - live
+    if not missing:
+        return
+
+    # Safety: Discord limits command updates per day, so never sync more than 15 times in 24h.
+    now = time.time()
+    sync_times[:] = [t for t in sync_times if now - t < 86400]
+    if len(sync_times) >= 15:
+        print("🚨 Watchdog: 15 re-syncs in 24h. Another bot with the SAME token keeps wiping the commands.")
+        return
+
+    print(f"🩹 Watchdog: missing {', '.join(sorted(missing))} — syncing again")
+    sync_times.append(now)
+    await sync_commands()
+
+
+@command_watchdog.before_loop
+async def _wait_ready_for_watchdog():
+    await bot.wait_until_ready()
+
+
+@bot.event
+async def setup_hook():
+    bot.add_dynamic_items(PunishmentDetailsButton)
+    warning_expiry_loop.start()
+    command_watchdog.start()
+
+
+@bot.command(name="sync")
+@commands.guild_only()
+@commands.has_guild_permissions(administrator=True)
+async def sync_cmd(ctx: commands.Context):
+    ok = await sync_commands()
+    await ctx.reply("✅ Slash commands re-synced." if ok else "❌ Sync failed, check the logs.")
+
+
+@bot.event
+async def on_ready():
+    global _commands_checked
+    print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
+    if not _commands_checked:
+        _commands_checked = True
+        await ensure_commands()
+    print(f"👮 Staff role IDs: {sorted(STAFF_ROLE_IDS) or 'none set'}")
+    print(f"🛡️ Moderator role ID: {MOD_ROLE_ID}")
+    print(f"🔨 Who can ban: {TIER_LABEL[BAN_MIN_TIER]} | kick: {TIER_LABEL[KICK_MIN_TIER]} | blacklist: {TIER_LABEL[BLACKLIST_MIN_TIER]}")
+    print(f"⚠️ Warning expiration: {WARNING_EXPIRE_DAYS} days")
+    print(f"⏳ Warning {WARN_TIMEOUT_AT} = automatic {WARN_TIMEOUT_HOURS}h timeout")
+    if (os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RAILWAY_PROJECT_ID")) and not (
+        os.environ.get("DATA_DIR") or os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
     ):
-        guild = member.guild
-        if guild.id != GUILD_ID or before.channel == after.channel:
+        print("🚨 NO VOLUME: the case database is stored inside the container and is DELETED on every "
+              "redeploy. Add a Volume mounted at /data in Railway (Settings > Volumes) and redeploy.")
+    print(f"🟢 Warning cleared channel: {WARNING_CLEAR_CHANNEL_ID}")
+    print(f"💀 Blacklist banner: {'found' if os.path.exists(BANNER_PATH) else 'NOT FOUND at ' + BANNER_PATH}")
+
+    guild = bot.get_guild(GUILD_ID)
+    if guild is not None:
+        if guild.get_role(WARN_1_ROLE_ID) is None or guild.get_role(WARN_2_ROLE_ID) is None:
+            print("⚠️ Warn 1 / Warn 2 role not found — check the role IDs")
+        if guild.get_channel(WARNING_CLEAR_CHANNEL_ID) is None:
+            print("⚠️ WARNING_CLEAR_CHANNEL_ID channel not found")
+        log_targets = find_warn_log_channels(guild)
+        print("📝 Warn logs go to: " + (", ".join(f"#{c.name}" for c in log_targets) or "NOWHERE (no channel named 'warn' found)"))
+        blk = guild.get_role(BLACKLIST_ROLE_ID)
+        if blk is None:
+            print("⚠️ Blacklist role not found — check BLACKLIST_ROLE_ID")
+        elif guild.me and blk >= guild.me.top_role:
+            print("⚠️ The Blacklist role is ABOVE my role — move my role higher or /blacklist will fail")
+
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    """Leaving and rejoining doesn't wash anything away: Blacklist / Warn roles come back."""
+    if member.guild.id != GUILD_ID:
+        return
+
+    if member.id in blacklist_records:
+        try:
+            await lock_blacklist_roles(member, "Blacklisted member rejoined")
+            print(f"💀 Blacklist role re-applied to {member} after rejoining")
+        except Exception as e:
+            print(f"❌ Couldn't re-apply the blacklist role to {member}: {e}")
+        return
+
+    count = active_warning_count(member.id)
+    if count:
+        await update_warning_roles(member.guild, member, min(count, MAX_WARNINGS - 1))
+
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    """Blacklist lock: a blacklisted member keeps ONLY the blacklist role."""
+    if after.guild.id != GUILD_ID or after.id not in blacklist_records:
+        return
+    if before.roles == after.roles:
+        return
+
+    role = after.guild.get_role(BLACKLIST_ROLE_ID)
+    if role is None:
+        return
+    extras = [
+        r for r in after.roles
+        if not r.is_default() and not r.managed and r.id != role.id and r.id not in KEEP_ROLE_IDS
+    ]
+    if not extras and role in after.roles:
+        return   # already exactly right (this is also what our own edit looks like)
+
+    try:
+        await lock_blacklist_roles(after, "Blacklisted: roles are locked")
+        print(f"💀 Blacklist lock: reset the roles of {after}")
+    except discord.HTTPException as e:
+        print(f"❌ Blacklist lock failed for {after}: {e}")
+    except Exception as e:
+        print(f"❌ Blacklist lock error for {after}: {e}")
+
+
+@bot.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    if isinstance(error, (commands.CommandNotFound, commands.CheckFailure)):
+        return
+    print(f"❌ Prefix command error: {error}")
+
+
+# ================================================================
+# /WARN
+# ================================================================
+@bot.tree.command(
+    name="warn",
+    description="Give a warning to a member. Each warning expires 30 days after it was given.",
+    guild=GUILD,
+)
+@app_commands.describe(member="The member being warned", reason="Why they're being warned")
+@app_commands.guild_only()
+@require_tier("staff")
+async def warn_cmd(interaction: discord.Interaction, member: discord.Member, reason: app_commands.Range[str, 1, 300]):
+    await interaction.response.defer(ephemeral=True)
+
+    problem = target_problem(interaction, member, needs_bot_rank=False)
+    if problem:
+        return await reject(interaction, "warn", member, problem)
+    if member.id in blacklist_records:
+        return await reject(interaction, "warn", member, "That member is already blacklisted.")
+
+    guild = interaction.guild
+
+    # One warn at a time: counting, the card and the roles can't be raced by a second staff member.
+    async with warning_lock:
+        warning_count = max(active_warning_count(member.id), role_warning_level(guild, member)) + 1
+        percent = warning_percent(warning_count)
+        auto_ban = warning_count >= MAX_WARNINGS and can_ban(interaction.user)
+
+        card_type = "BAN" if auto_ban else "WARNING"
+        card_reason = reason
+        if auto_ban:
+            card_reason = f"{reason} - {MAX_WARNINGS} active warnings reached. Automatic ban applied."[:300]
+
+        # 2nd warning: the timeout is applied FIRST, so the SAME warning card can show the duration
+        # (one card for the warning + the timeout, not two).
+        timed_out = False
+        if warning_count == WARN_TIMEOUT_AT and not auto_ban:
+            if guild.me and member.top_role >= guild.me.top_role:
+                await interaction.followup.send(
+                    "⚠️ I can't time that member out: their highest role is equal to or above mine.", ephemeral=True
+                )
+            else:
+                try:
+                    await member.timeout(
+                        timedelta(hours=WARN_TIMEOUT_HOURS),
+                        reason=audit_reason(f"Warning {warning_count}/{MAX_WARNINGS}: {reason}", "auto-timeout", bot.user),
+                    )
+                    timed_out = True
+                    card_type = "WARN + TIMEOUT"   # the stamp on the card shows both
+                    # "(for 2 hours)" at the end becomes the DURATION field on the card
+                    card_reason = f"{reason[:270]} (for {WARN_TIMEOUT_HOURS} hours)"
+                except discord.HTTPException as e:
+                    print(f"❌ Auto-timeout failed for {member}: {e}")
+                    await interaction.followup.send(f"⚠️ The warning is given, but the timeout failed: {e}", ephemeral=True)
+
+        record_extra = {
+            "warning_active": True,
+            "warning_issued_at": discord.utils.utcnow().isoformat(),
+            "warning_count": warning_count,
+            "warning_percent": percent,
+        }
+        if auto_ban:
+            record_extra["automatic_ban"] = True
+        if timed_out:
+            record_extra["auto_timeout_hours"] = WARN_TIMEOUT_HOURS
+
+        confirm_note = ""
+        if not auto_ban:
+            confirm_note = f"{bold('Active warnings:')} **{warning_count}/{MAX_WARNINGS}**."
+            if timed_out:
+                confirm_note += f" {bold(f'Timed out for {WARN_TIMEOUT_HOURS} hours.')}"
+
+        case_no = await issue_punishment(
+            interaction, member, "WARNING", card_reason,
+            card_ptype=card_type,
+            record_extra=record_extra,
+            confirm_note=confirm_note,
+            severity=None if auto_ban else percent,   # a BAN card keeps its own 100% bar
+        )
+
+        if case_no is None:
+            # Card failed before anything was saved: no record, so don't touch the roles.
+            if timed_out:
+                try:
+                    await member.timeout(None, reason="Warning card failed - timeout undone")
+                except discord.HTTPException:
+                    pass
             return
 
-        if before.channel is None and after.channel is not None:
-            embed = make(
-                "Joined Voice Channel",
-                line("Member", person(member)),
-                line("Channel", vc_ref(guild, after.channel)),
+        # old Warn role is swapped for the new one in a single role edit
+        await update_warning_roles(guild, member, warning_count if auto_ban else min(warning_count, MAX_WARNINGS - 1))
+
+    # ---- warn log ----
+    await log_warn_event(
+        guild, "Warning Given", member,
+        _log_line("Member", _person(member)),
+        _log_line("Warned by", _person(interaction.user)),
+        _log_line("Reason", short(reason, 900)),
+        _log_line("Active warnings", f"`{warning_count}/{MAX_WARNINGS}`"),
+        _log_line("Case", f"`ELT-{case_no:04d}`"),
+        _log_line("Timeout", f"`{WARN_TIMEOUT_HOURS} hours`") if timed_out else "",
+        _log_line("Expires", discord.utils.format_dt(discord.utils.utcnow() + timedelta(days=WARNING_EXPIRE_DAYS), "R"))
+        if not auto_ban else "",
+        f"**Automatic ban** - {MAX_WARNINGS} warnings reached." if auto_ban else "",
+        f"**{MAX_WARNINGS} warnings reached** - the high rank was pinged for a ban decision."
+        if (warning_count >= MAX_WARNINGS and not auto_ban) else "",
+    )
+
+    # ---- 3rd warning by someone allowed to ban: automatic ban ----
+    if auto_ban:
+        dm = await dm_member(
+            member, guild, f"You have been banned from {guild.name}", reason, 0xE53935,
+            f"You reached {MAX_WARNINGS} active warnings.",
+        )
+        try:
+            await member.ban(reason=audit_reason(
+                f"{MAX_WARNINGS} active warnings reached: {reason}", "automatically banned", bot.user
+            ))
+            print(f"🔨 Automatic ban applied to {member} after warning #{warning_count}")
+        except discord.Forbidden:
+            await undo_dm(dm)
+            print(f"❌ Automatic ban failed for {member}: bot lacks ban permission/hierarchy.")
+            await interaction.followup.send(
+                "⚠️ The BAN card was posted, but Discord refused the automatic ban. "
+                "Check my Ban Members permission and role position.",
+                ephemeral=True,
             )
-        elif before.channel is not None and after.channel is None:
-            embed = make(
-                "Left Voice Channel",
-                line("Member", person(member)),
-                line("Channel", vc_ref(guild, before.channel)),
+        except discord.HTTPException as e:
+            await undo_dm(dm)
+            print(f"❌ Automatic ban HTTPException for {member}: {e}")
+            await interaction.followup.send(f"⚠️ The BAN card was posted, but the automatic ban failed: {e}", ephemeral=True)
+        return
+
+    # ---- normal warning ----
+    # DM with the reason
+    info = (
+        f"Active warnings: {warning_count}/{MAX_WARNINGS}. "
+        f"Each warning is removed automatically {WARNING_EXPIRE_DAYS} days after it was given."
+    )
+    if timed_out:
+        info += f" You are also timed out for {WARN_TIMEOUT_HOURS} hours."
+    await dm_member(
+        member, guild, f"You received warning {warning_count}/{MAX_WARNINGS} in {guild.name}",
+        reason, 0xF5A623, info,
+    )
+
+    # ---- 3rd+ warning from someone who can't ban: no ban, ping the high rank ----
+    if warning_count >= MAX_WARNINGS:
+        admin_role = guild.get_role(ADMIN_ROLE_ID)
+        who = admin_role.mention if admin_role else "High rank"
+        try:
+            await get_log_channel(interaction).send(
+                f"{who} {member.mention} now has **{warning_count}** active warnings. "
+                f"The high rank needs to decide on a ban.",
+                allowed_mentions=discord.AllowedMentions(
+                    roles=[admin_role] if admin_role else False, users=False, everyone=False
+                ),
             )
+        except discord.HTTPException as e:
+            print(f"⚠️ Couldn't post the 3rd-warning notice: {e}")
+
+        await interaction.followup.send(
+            f"ℹ️ {member.mention} now has **{warning_count}** active warnings. "
+            f"You can't ban, so I pinged the high rank.",
+            ephemeral=True,
+        )
+
+
+# ================================================================
+# /UNWARN
+# ================================================================
+@bot.tree.command(name="unwarn", description="Remove the most recent active warning from a member.", guild=GUILD)
+@app_commands.describe(member="The member whose latest warning should be removed", reason="Why the warning is being removed")
+@app_commands.guild_only()
+@require_tier("staff")
+async def unwarn_cmd(interaction: discord.Interaction, member: discord.Member, reason: app_commands.Range[str, 1, 300]):
+    await interaction.response.defer(ephemeral=True)
+
+    problem = target_problem(interaction, member, needs_bot_rank=False)
+    if problem:
+        return await reject(interaction, "unwarn", member, problem)
+
+    orphan = False   # True = the member has a Warn role but no saved warning record
+    auto_timeout_end = None   # when the 2nd-warning timeout of the removed warning ends (None = it had none)
+    async with warning_lock:
+        active = active_warning_records(member.id)
+        if active:
+            case_no, record = active[-1]   # newest only
+            issued = _parse_warning_time(record)
+            if record.get("auto_timeout_hours") and issued:
+                auto_timeout_end = issued + timedelta(hours=record["auto_timeout_hours"])
+            record["warning_active"] = False
+            record["warning_cleared_at"] = discord.utils.utcnow().isoformat()
+            record["warning_cleared_by_id"] = interaction.user.id
+            record["warning_cleared_by_tag"] = str(interaction.user)
+            record["warning_clear_method"] = "manual_unwarn"
+            record["warning_clear_reason"] = reason
+            save_db()
+            remaining = active_warning_count(member.id)
         else:
-            embed = make(
-                "Moved Voice Channel",
-                line("Member", person(member)),
-                line("From", vc_ref(guild, before.channel)),
-                line("To", vc_ref(guild, after.channel)),
-            )
+            level = role_warning_level(interaction.guild, member)
+            if level == 0:
+                return await interaction.followup.send(f"ℹ️ {member.mention} has no active warnings.", ephemeral=True)
+            # The Warn role is there but the record is missing: lower the role by one level.
+            orphan, case_no = True, None
+            remaining = level - 1
+            print(f"⚠️ /unwarn: {member} has a Warn role but no saved warning record — lowering the role only")
 
-        embed.set_thumbnail(url=member.display_avatar.url)
-        await self.log(guild, "voice", embed)
+        await update_warning_roles(interaction.guild, member, min(remaining, MAX_WARNINGS - 1))
 
-    # ---------------------------------------------------------------- voice power abuse (moderator actions only)
-    async def _disconnect_entry(self, guild: discord.Guild, member: discord.Member) -> discord.AuditLogEntry | None:
-        """Returns the audit entry of a moderator disconnect that has NOT been matched to a member yet.
-        Discord writes ONE entry per disconnect action and raises its `count` when the same moderator
-        disconnects more people shortly after - so every leave 'uses up' one count. A person who simply
-        leaves on their own finds no unused count and is correctly ignored."""
-        if not guild.me.guild_permissions.view_audit_log:
-            return None
-        await asyncio.sleep(2)
+    # If the removed warning is the one that caused the 2h timeout, the timeout goes too
+    # (a different, longer timeout given by a moderator is left alone).
+    timeout_lifted = False
+    until = member.timed_out_until
+    if auto_timeout_end and until and until <= auto_timeout_end + timedelta(minutes=2):
         try:
-            async for entry in guild.audit_logs(limit=8, action=discord.AuditLogAction.member_disconnect):
-                age = (discord.utils.utcnow() - entry.created_at).total_seconds()
-                if age > 15 or entry.user is None or entry.user.id == member.id:
-                    continue
-                count = int(getattr(entry.extra, "count", 1) or 1)
-                used = self._disconnects_used.get(entry.id, 0)
-                if used < count:
-                    self._disconnects_used[entry.id] = used + 1
-                    if len(self._disconnects_used) > 200:   # keep the memory small
-                        for old in sorted(self._disconnects_used)[:100]:
-                            self._disconnects_used.pop(old, None)
-                    return entry
-        except discord.HTTPException:
-            pass
-        return None
+            await member.timeout(None, reason=audit_reason(reason, "warning removed, timeout lifted", interaction.user))
+            timeout_lifted = True
+        except discord.HTTPException as e:
+            print(f"⚠️ Couldn't lift the timeout of {member}: {e}")
 
-    @commands.Cog.listener("on_voice_state_update")
-    async def voice_mute_deafen(
-        self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
-    ):
-        guild = member.guild
-        if guild.id != GUILD_ID:
-            return
+    # The card shows no case number (the punisher is already on the card);
+    # the case stays in the saved record and the "View Punishment Details" button.
+    clear_reason = f"Warning removed: {reason[:1].upper() + reason[1:]}"[:300]
+    await post_warning_cleared_card(interaction.guild, member, interaction.user, clear_reason, [case_no] if case_no else [])
+    await log_warn_event(
+        interaction.guild, "Warning Removed", member,
+        _log_line("Member", _person(member)),
+        _log_line("Removed by", _person(interaction.user)),
+        _log_line("Reason", short(reason, 900)),
+        _log_line("Active warnings left", f"`{remaining}/{MAX_WARNINGS}`"),
+        _log_line("Case", f"`ELT-{case_no:04d}`") if case_no else "",
+        "Their timeout was lifted too." if timeout_lifted else "",
+    )
 
-        # --- server mute / deafen (only logged if a moderator did it)
-        events = []
-        if after.channel is not None:
-            if before.mute != after.mute:
-                events.append(("Server Muted" if after.mute else "Server Unmuted", "mute"))
-            if before.deaf != after.deaf:
-                events.append(("Server Deafened" if after.deaf else "Server Undeafened", "deaf"))
-        for title, attr in events:
-            entry = await self.audit_entry(
-                guild, discord.AuditLogAction.member_update, member.id,
-                check=lambda e, a=attr: getattr(e.after, a, None) is not None,
-            )
-            if entry is None or entry.user.id == member.id:
-                continue
-            embed = make(
-                title,
-                line("Member", person(member)),
-                line("Channel", vc_ref(guild, after.channel)),
-                self.by(entry, "Moderator"),
-            )
-            embed.set_thumbnail(url=member.display_avatar.url)
-            await self.log(guild, "voice_state", embed)
+    await dm_member(
+        member, interaction.guild,
+        f"A warning was removed in {interaction.guild.name}", reason, 0x57F287,
+        f"Active warnings left: {remaining}/{MAX_WARNINGS}.",
+    )
 
-        # --- disconnected from voice by a moderator
-        if before.channel is not None and after.channel is None:
-            entry = await self._disconnect_entry(guild, member)
-            if entry is not None:
-                embed = make(
-                    "Disconnected By Moderator",
-                    line("Member", person(member)),
-                    line("Channel", vc_ref(guild, before.channel)),
-                    self.by(entry, "Moderator"),
-                )
-                embed.set_thumbnail(url=member.display_avatar.url)
-                await self.log(guild, "voice_state", embed)
+    if orphan:
+        await interaction.followup.send(
+            f"🟢 Warning removed from {member.mention}. Active warnings remaining: **{remaining}**.\n"
+            f"ℹ️ I had no saved record of that warning (it was probably given before the database was reset), "
+            f"so I only lowered their Warn role.",
+            ephemeral=True,
+        )
+    else:
+        await interaction.followup.send(
+            f"🟢 Warning ELT-{case_no:04d} removed from {member.mention}. Active warnings remaining: **{remaining}**."
+            + (" Their timeout was lifted too." if timeout_lifted else ""),
+            ephemeral=True,
+        )
 
 
-async def setup(bot: commands.Bot):
-    await bot.add_cog(ServerLogs(bot))
-    print("[logs] Server logs loaded")
+# ================================================================
+# /MUTE and /TIMEOUT
+# ================================================================
+async def _apply_timeout(interaction, member, duration, reason, command, ptype, shown_reason):
+    """Shared by /mute and /timeout."""
+    try:
+        await member.timeout(duration, reason=audit_reason(reason, ptype.lower(), interaction.user))
+    except discord.Forbidden:
+        return await reject(interaction, command, member, "I do not have permission to time out that member.")
+    except discord.HTTPException as e:
+        print(f"❌ /{command} HTTPException for {member}: {e}")
+        return await interaction.followup.send(f"⚠️ {bold('Failed to apply the timeout:')} {e}", ephemeral=True)
+
+    await dm_member(
+        member, interaction.guild, f"You were {ptype.lower()}d in {interaction.guild.name}"
+        if ptype == "MUTE" else f"You were timed out in {interaction.guild.name}",
+        reason, 0x8E6CFF, shown_reason,
+    )
+    await issue_punishment(interaction, member, ptype, f"{reason} ({shown_reason})")
+
+
+@bot.tree.command(name="mute", description="Time a member out and log a mute card.", guild=GUILD)
+@app_commands.describe(member="The member being muted", minutes="How long to mute them for, in minutes", reason="Why they're being muted")
+@app_commands.guild_only()
+@require_tier("mod")
+async def mute_cmd(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    minutes: app_commands.Range[int, 1, 40320],
+    reason: app_commands.Range[str, 1, 300],
+):
+    await interaction.response.defer(ephemeral=True)
+    problem = target_problem(interaction, member)
+    if problem:
+        return await reject(interaction, "mute", member, problem)
+    await _apply_timeout(interaction, member, timedelta(minutes=minutes), reason, "mute", "MUTE", f"for {minutes}m")
+
+
+@bot.tree.command(name="timeout", description="Time a member out for minutes, hours or days and log a timeout card.", guild=GUILD)
+@app_commands.describe(member="The member being timed out", amount="How long (a number)", unit="Minutes, hours or days", reason="Why they're being timed out")
+@app_commands.choices(unit=[
+    app_commands.Choice(name="Minutes", value="minutes"),
+    app_commands.Choice(name="Hours", value="hours"),
+    app_commands.Choice(name="Days", value="days"),
+])
+@app_commands.guild_only()
+@require_tier("mod")
+async def timeout_cmd(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    amount: app_commands.Range[int, 1, 40320],
+    unit: app_commands.Choice[str],
+    reason: app_commands.Range[str, 1, 300],
+):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        duration = timedelta(**{unit.value: amount})
+    except OverflowError:
+        duration = timedelta(days=9999)
+
+    if duration > timedelta(days=28):
+        return await reject(interaction, "timeout", member, "Discord only allows timeouts up to 28 days.")
+
+    problem = target_problem(interaction, member)
+    if problem:
+        return await reject(interaction, "timeout", member, problem)
+
+    unit_label = unit.value if amount != 1 else unit.value[:-1]
+    await _apply_timeout(interaction, member, duration, reason, "timeout", "TIMEOUT", f"for {amount} {unit_label}")
+
+
+# ================================================================
+# /KICK  (high rank only)
+# ================================================================
+@bot.tree.command(name="kick", description="Kick a member and log a kick card. High rank only.", guild=GUILD)
+@app_commands.describe(member="The member being kicked", reason="Why they're being kicked")
+@app_commands.guild_only()
+@require_tier(KICK_MIN_TIER)
+async def kick_cmd(interaction: discord.Interaction, member: discord.Member, reason: app_commands.Range[str, 1, 300]):
+    await interaction.response.defer(ephemeral=True)
+
+    problem = target_problem(interaction, member)
+    if problem:
+        return await reject(interaction, "kick", member, problem)
+
+    # DM first: after the kick the bot no longer shares a server with them.
+    dm = await dm_member(member, interaction.guild, f"You were kicked from {interaction.guild.name}", reason, 0xFF7043)
+
+    try:
+        await member.kick(reason=audit_reason(reason, "kicked", interaction.user))
+    except discord.Forbidden:
+        await undo_dm(dm)
+        return await reject(interaction, "kick", member, "I do not have permission to kick that member.")
+    except discord.HTTPException as e:
+        await undo_dm(dm)
+        print(f"❌ /kick HTTPException for {member}: {e}")
+        return await interaction.followup.send(f"⚠️ {bold('Failed to kick:')} {e}", ephemeral=True)
+
+    await issue_punishment(interaction, member, "KICK", reason)
+
+
+# ================================================================
+# /BAN  (high rank only; also works on someone who already left the server)
+# ================================================================
+@bot.tree.command(name="ban", description="Ban a member and log a ban card. High rank only.", guild=GUILD)
+@app_commands.describe(member="Who to ban (can be someone who already left: paste their user ID)", reason="Why they're being banned")
+@app_commands.guild_only()
+@require_tier(BAN_MIN_TIER)
+async def ban_cmd(interaction: discord.Interaction, member: discord.User, reason: app_commands.Range[str, 1, 300]):
+    await interaction.response.defer(ephemeral=True)
+
+    guild = interaction.guild
+    in_server = guild.get_member(member.id)
+
+    if in_server is not None:
+        problem = target_problem(interaction, in_server)
+    elif member.id == interaction.user.id:
+        problem = "You can't punish yourself."
+    elif bot.user and member.id == bot.user.id:
+        problem = "I can't punish myself."
+    elif member.id == guild.owner_id:
+        problem = "You can't punish the server owner."
+    else:
+        problem = None
+
+    if problem:
+        return await reject(interaction, "ban", member, problem)
+
+    dm = await dm_member(member, guild, f"You were banned from {guild.name}", reason, 0xE53935) if in_server else None
+
+    try:
+        await guild.ban(member, reason=audit_reason(reason, "banned", interaction.user))
+    except discord.Forbidden:
+        await undo_dm(dm)
+        return await reject(interaction, "ban", member, "I do not have permission to ban that member.")
+    except discord.HTTPException as e:
+        await undo_dm(dm)
+        print(f"❌ /ban HTTPException for {member}: {e}")
+        return await interaction.followup.send(f"⚠️ {bold('Failed to ban:')} {e}", ephemeral=True)
+
+    await issue_punishment(interaction, member, "BAN", reason)
+
+
+# ================================================================
+# /BLACKLIST  and  /UNBLACKLIST  (high rank only)
+# ================================================================
+@bot.tree.command(
+    name="blacklist",
+    description="Blacklist a member: remove ALL their roles and give them the blacklist role. High rank only.",
+    guild=GUILD,
+)
+@app_commands.describe(member="The member being blacklisted", reason="Why they're being blacklisted")
+@app_commands.guild_only()
+@require_tier(BLACKLIST_MIN_TIER)
+async def blacklist_cmd(interaction: discord.Interaction, member: discord.Member, reason: app_commands.Range[str, 1, 300]):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+
+    problem = target_problem(interaction, member)
+    if problem:
+        return await reject(interaction, "blacklist", member, problem)
+
+    role = guild.get_role(BLACKLIST_ROLE_ID)
+    if role is None:
+        return await reject(interaction, "blacklist", member, "The blacklist role was not found — check BLACKLIST_ROLE_ID.")
+    if guild.me and role >= guild.me.top_role:
+        return await reject(interaction, "blacklist", member, "The blacklist role is above mine — move my role higher.")
+
+    async with blacklist_lock:
+        if member.id in blacklist_records:
+            return await reject(interaction, "blacklist", member, "That member is already blacklisted.")
+
+        removed = [r.id for r in removable_roles(member)]
+        try:
+            await lock_blacklist_roles(member, audit_reason(reason, "blacklisted", interaction.user))
+        except discord.Forbidden:
+            return await reject(interaction, "blacklist", member,
+                                "I do not have permission to change that member's roles (check Manage Roles and my role position).")
+        except discord.HTTPException as e:
+            print(f"❌ /blacklist HTTPException for {member}: {e}")
+            return await interaction.followup.send(f"⚠️ {bold('Failed to blacklist:')} {e}", ephemeral=True)
+
+        blacklist_records[member.id] = {
+            "roles": removed,
+            "reason": reason,
+            "by": interaction.user.id,
+            "by_tag": str(interaction.user),
+            "date_text": discord.utils.utcnow().strftime("%d/%m/%Y"),
+        }
+        save_db()
+        print(f"💀 {member} blacklisted by {interaction.user} ({len(removed)} roles removed)")
+
+    await dm_member(
+        member, guild, f"You were blacklisted in {guild.name}", reason, 0x2B2D31,
+        "All your roles were removed. Only the high rank can lift this.",
+    )
+
+    case_no = await issue_punishment(
+        interaction, member, "BLACKLIST", reason,
+        record_extra={"removed_roles": removed},
+        confirm_note=f"{bold('Roles removed:')} **{len(removed)}**.",
+    )
+    if case_no is not None and member.id in blacklist_records:
+        blacklist_records[member.id]["case"] = case_no
+        save_db()
+
+
+@bot.tree.command(
+    name="unblacklist",
+    description="Lift a blacklist and give the member their old roles back. High rank only.",
+    guild=GUILD,
+)
+@app_commands.describe(member="The member to un-blacklist (also works if they left: paste their user ID)", reason="Why the blacklist is lifted")
+@app_commands.guild_only()
+@require_tier(BLACKLIST_MIN_TIER)
+async def unblacklist_cmd(interaction: discord.Interaction, member: discord.User, reason: app_commands.Range[str, 1, 300]):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+
+    async with blacklist_lock:
+        entry = blacklist_records.get(member.id)
+        if entry is None:
+            return await interaction.followup.send(f"ℹ️ {member.mention} is not blacklisted.", ephemeral=True)
+
+        target = guild.get_member(member.id)
+
+        # The record goes FIRST, otherwise the blacklist lock would strip the restored roles again.
+        del blacklist_records[member.id]
+        save_db()
+
+        restored = 0
+        if target is not None:
+            me_top = guild.me.top_role if guild.me else None
+            old_roles = [guild.get_role(i) for i in entry.get("roles", [])]
+            restore = [
+                r for r in old_roles
+                if r and not r.is_default() and not r.managed and (me_top is None or r < me_top)
+            ]
+            try:
+                await target.edit(roles=kept_roles(target) + restore,
+                                  reason=audit_reason(reason, "unblacklisted", interaction.user))
+                restored = len(restore)
+            except discord.HTTPException as e:
+                blacklist_records[member.id] = entry   # put it back: nothing changed
+                save_db()
+                print(f"❌ /unblacklist failed for {member}: {e}")
+                return await interaction.followup.send(
+                    f"⚠️ {bold('Failed to give the roles back:')} {e}", ephemeral=True)
+
+            await update_warning_roles(guild, target, min(active_warning_count(target.id), MAX_WARNINGS - 1))
+
+    print(f"💀 {member} un-blacklisted by {interaction.user} ({restored} roles restored)")
+
+    if target is not None:
+        await dm_member(
+            target, guild, f"Your blacklist in {guild.name} was lifted", reason, 0x57F287,
+            "Your roles were given back.",
+        )
+
+    embed = discord.Embed(
+        title=bold("Blacklist removed"),
+        description=f"{member.mention} was removed from the blacklist by {interaction.user.mention}.",
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name=bold("Reason"), value=short(reason, 300), inline=False)
+    if target is not None:
+        embed.add_field(name=bold("Roles restored"), value=str(restored), inline=True)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    try:
+        await get_log_channel(interaction).send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as e:
+        print(f"⚠️ Couldn't post the blacklist-removed notice: {e}")
+
+    note = f"{restored} roles restored." if target is not None else "They are not in the server, so no roles were given."
+    await interaction.followup.send(f"🟢 {member.mention} is no longer blacklisted. {note}", ephemeral=True)
+
+
+@bot.tree.command(name="blacklisted", description="Show everyone who is currently blacklisted.", guild=GUILD)
+@app_commands.guild_only()
+@require_tier("mod")
+async def blacklisted_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    if not blacklist_records:
+        return await interaction.followup.send("ℹ️ Nobody is blacklisted.", ephemeral=True)
+
+    rows = sorted(blacklist_records.items(), key=lambda kv: kv[1].get("case", 0), reverse=True)
+    lines = [
+        f"<@{uid}> • {e.get('date_text', '?')} • by <@{e.get('by', 0)}>\n{short(e.get('reason', ''), 120)}"
+        for uid, e in rows[:15]
+    ]
+    embed = discord.Embed(
+        title=bold("Blacklisted members"),
+        description="\n\n".join(lines)[:4000],
+        color=discord.Color.dark_grey(),
+    )
+    embed.set_footer(text=f"Showing {min(len(rows), 15)} of {len(rows)}")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ================================================================
+# /WARNINGS and /HISTORY  (read-only)
+# ================================================================
+@bot.tree.command(name="warnings", description="Show a member's active warnings and when they clear.", guild=GUILD)
+@app_commands.describe(member="The member to check")
+@app_commands.guild_only()
+@require_tier("mod")
+async def warnings_cmd(interaction: discord.Interaction, member: discord.User):
+    await interaction.response.defer(ephemeral=True)
+
+    active = active_warning_records(member.id)
+    if not active:
+        return await interaction.followup.send(f"ℹ️ {member.mention} has no active warnings.", ephemeral=True)
+
+    lines = [
+        f"**ELT-{case_no:04d}** • {rec['date_text']} • by <@{rec['punisher_id']}>\n{short(rec['reason'], 150)}"
+        for case_no, rec in active
+    ]
+    embed = discord.Embed(
+        title=bold(f"Active warnings — {card_name(member)}"),
+        description="\n\n".join(lines)[:4000],
+        color=discord.Color.orange(),
+    )
+
+    times = [t for t in (_parse_warning_time(rec) for _, rec in active) if t]
+    if times:
+        clears = min(times) + timedelta(days=WARNING_EXPIRE_DAYS)   # the oldest warning expires first
+        embed.add_field(name=bold("Next warning expires"), value=discord.utils.format_dt(clears, "R"), inline=False)
+    embed.set_footer(text=f"{len(active)}/{MAX_WARNINGS} active warnings")
+    embed.set_thumbnail(url=member.display_avatar.url)
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="history", description="Show a member's last punishment cases.", guild=GUILD)
+@app_commands.describe(member="The member to check (works for people who left: paste their user ID)")
+@app_commands.guild_only()
+@require_tier("mod")
+async def history_cmd(interaction: discord.Interaction, member: discord.User):
+    await interaction.response.defer(ephemeral=True)
+
+    cases = sorted(
+        ((c, r) for c, r in punishment_records.items() if r.get("user_id") == member.id),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    if not cases:
+        return await interaction.followup.send(f"ℹ️ No cases found for {member.mention}.", ephemeral=True)
+
+    lines = [
+        f"`ELT-{c:04d}` **{r.get('display_type', r['type']).title()}** • {r['date_text']}\n{short(r['reason'], 100)}"
+        for c, r in cases[:15]
+    ]
+    embed = discord.Embed(
+        title=bold(f"Case history — {card_name(member)}"),
+        description="\n\n".join(lines)[:4000],
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(text=f"Showing {min(len(cases), 15)} of {len(cases)} cases")
+    embed.set_thumbnail(url=member.display_avatar.url)
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ================================================================
+# APP COMMAND ERROR
+# ================================================================
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    command_name = interaction.command.name if interaction.command else "unknown"
+
+    # A "you are not allowed" rejection is normal: one short line, no traceback.
+    if isinstance(error, (NotAllowed, app_commands.MissingPermissions)):
+        print(f"🚫 /{command_name}: {interaction.user} not allowed")
+    else:
+        print("\n" + "=" * 70)
+        print(f"❌ APP COMMAND ERROR  /{command_name}  by {interaction.user} ({interaction.user.id})")
+        print(f"Error: {type(error).__name__}: {error}")
+        original = getattr(error, "original", None)
+        if original is not None:
+            print(f"Original: {type(original).__name__}: {original}")
+        traceback.print_exception(type(error), error, error.__traceback__)
+        print("=" * 70 + "\n")
+
+    if isinstance(error, app_commands.MissingPermissions):
+        msg = f"⚠️ {bold('You do not have permission to do that.')}"
+    elif isinstance(error, NotAllowed):
+        msg = f"⚠️ {bold(str(error))}"
+    elif isinstance(error, app_commands.TransformerError):
+        msg = f"⚠️ {bold('I could not find that member in the server — they may have left.')}"
+    elif isinstance(error, app_commands.CheckFailure):
+        msg = f"⚠️ {bold('You are not allowed to use this command.')}"
+    else:
+        msg = f"⚠️ {bold('Something went wrong running that command.')}"
+
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except discord.HTTPException:
+        pass
+
+
+# ================================================================
+# START BOT
+# ================================================================
+if not TOKEN:
+    raise SystemExit("DISCORD_TOKEN is not set. Add it in Railway's Variables tab, then redeploy.")
+
+bot.run(TOKEN)

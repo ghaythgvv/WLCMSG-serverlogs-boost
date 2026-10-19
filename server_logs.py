@@ -7,6 +7,7 @@ Logs server events into the matching channel of your SERVER LOGS category:
     ban / unban ............. -BANS-UNBANS
     timeout / untimeout ..... -TIMEOUT
     kick .................... -KICK
+    warn / unwarn ........... warn            <- NEW (see "WARNINGS" below)
     role given / removed .... -ROLE-GIVEN-REMOVED
     role created / deleted .. -ROLE-CREATED-DELETED
     channel created / deleted -CHANNEL-CREATED-DELETED
@@ -19,7 +20,18 @@ If you ever rename a channel, either keep the keyword in the name or paste its I
 LOG_CHANNEL_IDS below.
 
 The bot needs: View Audit Log (to show WHO did it) + View Channel / Send Messages / Embed Links
-in each log channel. SERVER MEMBERS INTENT must be on (it already is for the welcome bot).
+in each log channel (the #warn channel is private: add the bot to it!). SERVER MEMBERS INTENT must be on
+(it already is for the welcome bot).
+
+WARNINGS  (new)
+    !warn @member reason ....... warns the member: the member gets a DM, the warning is saved and logged in #warn
+    !warnings [@member] ........ shows the warnings (staff: anybody, everybody else: only their own)
+    !unwarn @member [last|all|number]   removes a warning (it is logged too)
+  Who may use them: the server owner, members with Administrator / Timeout Members / Kick Members / Ban Members,
+  and members of the roles listed in WARN_ROLE_IDS below. Nobody can warn a bot, the owner, themselves or somebody
+  whose highest role is not below their own. The commands use your bot's normal prefix (for example !warn).
+  The warnings are saved in warns.json (or on the Railway volume if one is mounted - automatic).
+  Other bots (Wick, Carl-bot...) keep their own warnings - this log only shows warnings given with THIS bot.
 
 This file is loaded by welcome_bot.py:  await bot.load_extension("server_logs")
 
@@ -36,6 +48,9 @@ Fixed in this version
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import time
 import unicodedata
 
 import discord
@@ -50,6 +65,7 @@ CHANNEL_KEYWORDS = {
     "ban": "bans-unbans",
     "timeout": "timeout",
     "kick": "kick",
+    "warn": "warn",
     "role_member": "role-given-removed",
     "role_cd": "role-created-deleted",
     "channel_cd": "channel-created-deleted",
@@ -58,8 +74,12 @@ CHANNEL_KEYWORDS = {
     "all": "logs-all-server",
 }
 
-# Optional: force a channel by ID instead of by name. Example: {"kick": 123456789}
+# Optional: force a channel by ID instead of by name. Example: {"kick": 123456789, "warn": 123456789}
 LOG_CHANNEL_IDS: dict[str, int | None] = {}
+
+# Optional: roles that may use !warn / !unwarn even without the Timeout / Kick permission.
+# Example: WARN_ROLE_IDS = {111111111111111111, 222222222222222222}
+WARN_ROLE_IDS: set[int] = set()
 
 PURPLE = 0x9B30FF   # every log uses this color
 NEW_ACCOUNT_DAYS = 7
@@ -127,11 +147,24 @@ def vc_ref(guild: discord.Guild, channel) -> str:
     return f"**{channel.name}** (`{channel.id}`) - channel was deleted"
 
 
+def warn_file() -> str:
+    """WARN_DATA_FILE if set, else warns.json on the Railway volume (if one is mounted), else next to the bot."""
+    custom = os.getenv("WARN_DATA_FILE", "").strip()
+    if custom:
+        return custom
+    vol = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    return os.path.join(vol, "warns.json") if vol and os.path.isdir(vol) else "warns.json"
+
+
 class ServerLogs(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         # audit entry id -> how many of its disconnects were already matched to a member
         self._disconnects_used: dict[int, int] = {}
+        # warnings: str(user id) -> [{"mod": id, "reason": text, "at": unix time}, ...]
+        self._warns: dict[str, list[dict]] = {}
+        self._warn_lock = asyncio.Lock()
+        self._load_warns()
 
     # ---------------------------------------------------------------- helpers
     def find_channel(self, guild: discord.Guild, key: str) -> discord.TextChannel | None:
@@ -514,6 +547,166 @@ class ServerLogs(commands.Cog):
                 )
                 embed.set_thumbnail(url=member.display_avatar.url)
                 await self.log(guild, "voice_state", embed)
+
+    # ================================================================ WARNINGS
+    def _load_warns(self) -> None:
+        try:
+            with open(warn_file(), encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                self._warns = {str(k): v for k, v in data.items() if isinstance(v, list)}
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as e:
+            print(f"[logs] WARN: could not read the warnings file: {e}")
+
+    def _save_warns(self) -> None:
+        path = warn_file()
+        tmp = f"{path}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._warns, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, path)
+        except OSError as e:
+            print(f"[logs] ERROR: could not save the warnings file: {e}")
+
+    @staticmethod
+    def _can_warn(member: discord.Member) -> bool:
+        p = member.guild_permissions
+        return bool(
+            member.id == member.guild.owner_id
+            or p.administrator or p.moderate_members or p.kick_members or p.ban_members
+            or any(r.id in WARN_ROLE_IDS for r in member.roles)
+        )
+
+    @staticmethod
+    def _warn_problem(guild: discord.Guild, author: discord.Member, target: discord.Member) -> str | None:
+        if target.bot:
+            return "You can't warn a bot."
+        if target.id == author.id:
+            return "You can't warn yourself."
+        if target.id == guild.owner_id:
+            return "You can't warn the server owner."
+        if author.id != guild.owner_id and author.top_role <= target.top_role:
+            return "Their highest role is not below yours."
+        return None
+
+    def _warn_lines(self, member_id: int, only_last: int | None = None) -> list[str]:
+        items = self._warns.get(str(member_id), [])
+        start = max(0, len(items) - only_last) if only_last else 0
+        rows = []
+        for i in range(start, len(items)):
+            w = items[i]
+            rows.append(f"`{i + 1}` <t:{int(w.get('at', 0))}:R> by <@{w.get('mod', 0)}> - {str(w.get('reason', ''))[:200]}")
+        return rows
+
+    async def _dm_warn(self, member: discord.Member, reason: str, number: int) -> bool:
+        embed = discord.Embed(
+            description=(
+                f"# You received a warning\n"
+                f"**Server:** {member.guild.name}\n"
+                f"**Reason:** {reason}\n"
+                f"**Warning:** `#{number}`"
+            ),
+            color=PURPLE,
+        )
+        try:
+            await member.send(embed=embed)
+            return True
+        except discord.HTTPException:
+            return False
+
+    @commands.command(name="warn")
+    @commands.guild_only()
+    async def warn_cmd(self, ctx: commands.Context, member: discord.Member | None = None, *, reason: str = ""):
+        """!warn @member reason"""
+        guild, none = ctx.guild, discord.AllowedMentions.none()
+        if guild.id != GUILD_ID or not self._can_warn(ctx.author):
+            return
+        if member is None:
+            return await ctx.reply("Use `!warn @member reason`.", mention_author=False)
+        problem = self._warn_problem(guild, ctx.author, member)
+        if problem:
+            return await ctx.reply(problem, mention_author=False)
+
+        reason = (reason.strip() or "No reason provided")[:900]
+        async with self._warn_lock:
+            items = self._warns.setdefault(str(member.id), [])
+            items.append({"mod": ctx.author.id, "reason": reason, "at": int(time.time())})
+            number = len(items)
+            self._save_warns()
+
+        delivered = await self._dm_warn(member, reason, number)
+        embed = make(
+            "Member Warned",
+            line("Member", person(member)),
+            line("Moderator", person(ctx.author)),
+            line("Reason", reason),
+            line("Warning", f"`#{number}`"),
+            line("DM", "Delivered" if delivered else "Closed - the member could not be messaged"),
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await self.log(guild, "warn", embed)
+        await ctx.reply(f"Warned {member.mention} - this is warning **#{number}**.", mention_author=False, allowed_mentions=none)
+
+    @commands.command(name="warnings", aliases=["warns"])
+    @commands.guild_only()
+    async def warnings_cmd(self, ctx: commands.Context, member: discord.Member | None = None):
+        """!warnings [@member]  (staff: anybody, everybody else: only themselves)"""
+        if ctx.guild.id != GUILD_ID:
+            return
+        member = member or ctx.author
+        if member.id != ctx.author.id and not self._can_warn(ctx.author):
+            return
+        rows = self._warn_lines(member.id)
+        total = len(rows)
+        shown = rows[-10:]
+        embed = discord.Embed(
+            description=f"# Warnings - {member.display_name}\n"
+            + (f"**Total:** `{total}`\n" + "\n".join(shown) + (f"\n+{total - len(shown)} older" if total > len(shown) else "")
+               if rows else "No warnings."),
+            color=PURPLE,
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await ctx.reply(embed=embed, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+
+    @commands.command(name="unwarn")
+    @commands.guild_only()
+    async def unwarn_cmd(self, ctx: commands.Context, member: discord.Member | None = None, which: str = "last"):
+        """!unwarn @member [last|all|number]"""
+        guild = ctx.guild
+        if guild.id != GUILD_ID or not self._can_warn(ctx.author):
+            return
+        if member is None:
+            return await ctx.reply("Use `!unwarn @member` (or `all`, or the warning number).", mention_author=False)
+        async with self._warn_lock:
+            items = self._warns.get(str(member.id), [])
+            if not items:
+                return await ctx.reply(f"{member.display_name} has no warnings.", mention_author=False)
+            w = which.strip().lower()
+            if w == "all":
+                removed, items[:] = list(items), []
+            else:
+                idx = len(items) - 1 if w == "last" else (int(w) - 1 if w.isdigit() else -1)
+                if not 0 <= idx < len(items):
+                    return await ctx.reply(f"Warning number between 1 and {len(items)}, `last` or `all`.", mention_author=False)
+                removed = [items.pop(idx)]
+            if not items:
+                self._warns.pop(str(member.id), None)
+            remaining = len(self._warns.get(str(member.id), []))
+            self._save_warns()
+
+        embed = make(
+            "Warning Removed",
+            line("Member", person(member)),
+            line("Removed by", person(ctx.author)),
+            line("Removed", f"`{len(removed)}` - " + "; ".join(str(r.get("reason", ""))[:80] for r in removed[:3])),
+            line("Warnings left", f"`{remaining}`"),
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await self.log(guild, "warn", embed)
+        await ctx.reply(f"Removed {len(removed)} warning(s) from {member.mention}. Left: **{remaining}**.",
+                        mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 
 
 async def setup(bot: commands.Bot):

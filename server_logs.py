@@ -24,23 +24,23 @@ in each log channel (the #warn channel is private: add the bot to it!). SERVER M
 (it already is for the welcome bot).
 
 WARNINGS  (new)
-    !warn @member reason ....... warns the member: the member gets a DM, the warning is saved and logged in #warn
-    !warnings [@member] ........ shows the warnings (staff: anybody, everybody else: only their own)
-    !unwarn @member [last|all|number]   removes a warning (it is logged too)
+    !warn @member reason  or  /warn member reason ... warns the member: DM + saved + logged in #warn
+    !warnings [@member]   or  /warnings [member] .... shows the warnings (staff: anybody, everybody else: only their own)
+    !unwarn @member [last|all|number]  or /unwarn ... removes a warning (it is logged too)
   Who may use them: the server owner, members with Administrator / Timeout Members / Kick Members / Ban Members,
   and members of the roles listed in WARN_ROLE_IDS below. Nobody can warn a bot, the owner, themselves or somebody
-  whose highest role is not below their own. The commands use your bot's normal prefix (for example !warn).
+  whose highest role is not below their own.
   The warnings are saved in warns.json (or on the Railway volume if one is mounted - automatic).
   Other bots (Wick, Carl-bot...) keep their own warnings - this log only shows warnings given with THIS bot.
 
 This file is loaded by welcome_bot.py:  await bot.load_extension("server_logs")
 
 Fixed in this version
+    - !warn / !warnings / !unwarn are now hybrid commands, so /warn /warnings /unwarn work too
+      (the slash commands are synced once when the bot starts).
     - Voice logs no longer show "# unknown": when the voice channel was deleted in the meantime
       (temporary / report rooms), the channel NAME is shown instead.
     - "Disconnected By Moderator" is only logged when the audit log really shows a NEW disconnect.
-      Before, someone leaving on their own right after a moderator disconnected another person
-      was blamed on that moderator.
     - Server mute / deafen and timeout logs now check that the audit entry really is a mute / deafen /
       timeout, so a nickname change or other edit can't be shown as the "moderator" of a mute.
 """
@@ -164,6 +164,7 @@ class ServerLogs(commands.Cog):
         # warnings: str(user id) -> [{"mod": id, "reason": text, "at": unix time}, ...]
         self._warns: dict[str, list[dict]] = {}
         self._warn_lock = asyncio.Lock()
+        self._synced = False
         self._load_warns()
 
     # ---------------------------------------------------------------- helpers
@@ -195,6 +196,15 @@ class ServerLogs(commands.Cog):
             print(f"[logs] {'OK' if ok else 'WARN'}: {key} -> #{ch.name}" + ("" if ok else "  (bot can't send/embed here)"))
         if not guild.me.guild_permissions.view_audit_log:
             print("[logs] WARN: the bot is missing View Audit Log")
+
+        # Register /warn /warnings /unwarn with Discord (once per start)
+        if not self._synced:
+            self._synced = True
+            try:
+                synced = await self.bot.tree.sync()
+                print(f"[logs] OK: synced {len(synced)} slash command(s)")
+            except discord.HTTPException as e:
+                print(f"[logs] ERROR: slash command sync failed: {e}")
 
     async def log(self, guild: discord.Guild, key: str, embed: discord.Embed) -> None:
         """Send the embed to its own channel and to LOGS-ALL-SERVER."""
@@ -616,18 +626,22 @@ class ServerLogs(commands.Cog):
         except discord.HTTPException:
             return False
 
-    @commands.command(name="warn")
+    @commands.hybrid_command(name="warn")
     @commands.guild_only()
     async def warn_cmd(self, ctx: commands.Context, member: discord.Member | None = None, *, reason: str = ""):
-        """!warn @member reason"""
+        """Warn a member (DM + saved + logged in #warn)"""
         guild, none = ctx.guild, discord.AllowedMentions.none()
-        if guild.id != GUILD_ID or not self._can_warn(ctx.author):
+        if guild.id != GUILD_ID:
             return
+        if not self._can_warn(ctx.author):
+            return await ctx.reply("You don't have permission to warn.", mention_author=False, ephemeral=True)
         if member is None:
-            return await ctx.reply("Use `!warn @member reason`.", mention_author=False)
+            return await ctx.reply("Use `/warn member reason` or `!warn @member reason`.", mention_author=False, ephemeral=True)
         problem = self._warn_problem(guild, ctx.author, member)
         if problem:
-            return await ctx.reply(problem, mention_author=False)
+            return await ctx.reply(problem, mention_author=False, ephemeral=True)
+
+        await ctx.defer()  # slash commands must answer within 3 seconds
 
         reason = (reason.strip() or "No reason provided")[:900]
         async with self._warn_lock:
@@ -649,15 +663,15 @@ class ServerLogs(commands.Cog):
         await self.log(guild, "warn", embed)
         await ctx.reply(f"Warned {member.mention} - this is warning **#{number}**.", mention_author=False, allowed_mentions=none)
 
-    @commands.command(name="warnings", aliases=["warns"])
+    @commands.hybrid_command(name="warnings", aliases=["warns"])
     @commands.guild_only()
     async def warnings_cmd(self, ctx: commands.Context, member: discord.Member | None = None):
-        """!warnings [@member]  (staff: anybody, everybody else: only themselves)"""
+        """Show warnings (staff: anybody, everybody else: only themselves)"""
         if ctx.guild.id != GUILD_ID:
             return
         member = member or ctx.author
         if member.id != ctx.author.id and not self._can_warn(ctx.author):
-            return
+            return await ctx.reply("You can only see your own warnings.", mention_author=False, ephemeral=True)
         rows = self._warn_lines(member.id)
         total = len(rows)
         shown = rows[-10:]
@@ -670,15 +684,17 @@ class ServerLogs(commands.Cog):
         embed.set_thumbnail(url=member.display_avatar.url)
         await ctx.reply(embed=embed, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 
-    @commands.command(name="unwarn")
+    @commands.hybrid_command(name="unwarn")
     @commands.guild_only()
     async def unwarn_cmd(self, ctx: commands.Context, member: discord.Member | None = None, which: str = "last"):
-        """!unwarn @member [last|all|number]"""
+        """Remove a warning: last, all, or a warning number"""
         guild = ctx.guild
-        if guild.id != GUILD_ID or not self._can_warn(ctx.author):
+        if guild.id != GUILD_ID:
             return
+        if not self._can_warn(ctx.author):
+            return await ctx.reply("You don't have permission to remove warnings.", mention_author=False, ephemeral=True)
         if member is None:
-            return await ctx.reply("Use `!unwarn @member` (or `all`, or the warning number).", mention_author=False)
+            return await ctx.reply("Use `/unwarn member` (or `all`, or the warning number).", mention_author=False, ephemeral=True)
         async with self._warn_lock:
             items = self._warns.get(str(member.id), [])
             if not items:
